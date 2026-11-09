@@ -26,7 +26,7 @@ Every team member works on an assigned personal feature branch created from `mai
    git switch -c feat/<your-assigned-branch> origin/main
    ```
 3. **No Cross-Branch Dependencies:** Never branch off another teammate's feature branch unless coordinated by Prasanna.
-4. **Isolated Work:** Only edit the files you own. If a change to a shared file (such as `contracts/` or `thresholds.json`) is required, discuss and coordinate with the team lead first.
+4. **Isolated Work:** Only edit the files you own. If a change to a shared contract or configuration is required, discuss and coordinate with the team lead first.
 5. **Never Commit:**
    - Virtual environments (`.venv/`, `env/`)
    - Python bytecode (`__pycache__/`, `*.pyc`)
@@ -41,16 +41,16 @@ Every team member works on an assigned personal feature branch created from `mai
 Before submitting a PR, every member must run and pass the following merge gate locally:
 
 ```bash
-# 1. Syntax and compilation check across all modules
+# 1. Syntax compilation check across all modules
 python3 -m compileall -q aura analysis tests scripts
 
-# 2. Run unit tests
-python3 -m unittest discover -s tests -v
+# 2. Run unit and contract test suite using pytest
+python3 -m pytest -v tests/
 
-# 3. JSON schema syntax validation
-python3 -m json.tool contracts/client_window.schema.json > /dev/null
-python3 -m json.tool contracts/host_snapshot.schema.json > /dev/null
-python3 -m json.tool contracts/controller_event.schema.json > /dev/null
+# 3. JSON schema syntax validation (processed individually)
+for f in contracts/*.schema.json contracts/examples/*.json; do
+    python3 -m json.tool "$f" > /dev/null
+done
 ```
 
 ---

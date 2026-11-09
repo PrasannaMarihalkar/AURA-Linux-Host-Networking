@@ -1,0 +1,72 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# AURA runtime state and transient outputs
+state/
+*.log
+
+# Experimental data outputs (keep directory structure via .gitkeep)
+results/raw/*.jsonl
+results/raw/*.csv
+results/processed/*.jsonl
+results/processed/*.csv
+results/plots/*.png
+results/plots/*.pdf
+!results/**/.gitkeep
+
+# VM images, disk snapshots, large captures
+*.iso
+*.ova
+*.ovf
+*.vdi
+*.vmdk
+*.pcap
+*.pcapng
+
+# Environment variables and secrets
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+id_ed25519

@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.2",
+  "timestamp_epoch_s": 1794230000.30,
+  "server_boot_id": "b7a8d50f-e25c-4861-9c12-32b78912e541",
+  "run_id": "exp-contention-002",
+  "window_id": 3,
+  "report_age_s": 0.15,
+  "controller_mode": "dry_run",
+  "diagnosis": {
+    "label": "cpu_contention_candidate",
+    "confidence": 0.85,
+    "evidence": [
+      "Client P99 latency exceeded target for three consecutive windows",
+      "CPU PSI elevated above baseline"
+    ],
+    "limitations": [
+      "CPU PSI is an aggregated host pressure signal"
+    ]
+  },
+  "action": {
+    "type": "cpu_weight",
+    "status": "dry_run",
+    "reason": "Evidence threshold met; execution simulated in dry_run mode",
+    "before": {
+      "aura-app.slice": 100,
+      "aura-bg.slice": 100
+    },
+    "requested": {
+      "aura-app.slice": 200
+    },
+    "after": {
+      "aura-app.slice": 100,
+      "aura-bg.slice": 100
+    },
+    "rollback_attempted": false,
+    "rollback_verified": true,
+    "error": null
+  },
+  "p99_ms": 24.5,
+  "throughput_rps": 412.3,
+  "cpu_psi_some_avg10_pct": 18.4
+}

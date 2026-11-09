@@ -1,0 +1,3 @@
+# AURA Core Runtime Dependencies
+# Core AURA runtime relies strictly on the Python 3 standard library.
+# No third-party pip dependencies are required for baseline execution.

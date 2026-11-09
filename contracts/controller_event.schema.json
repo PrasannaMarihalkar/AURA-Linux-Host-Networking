@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AURA controller event v1.2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "timestamp_epoch_s",
+    "server_boot_id",
+    "run_id",
+    "window_id",
+    "controller_mode",
+    "diagnosis",
+    "action"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.2"
+    },
+    "timestamp_epoch_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Controller wall-clock epoch timestamp when event was evaluated. Audit only."
+    },
+    "server_boot_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Server Linux boot identity UUID (/proc/sys/kernel/random/boot_id)."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the active benchmark run."
+    },
+    "window_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Measurement window sequence number evaluated."
+    },
+    "report_age_s": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Age of the telemetry report computed from server monotonic timestamp."
+    },
+    "stale_telemetry": {
+      "type": "boolean",
+      "description": "Flag indicating whether report exceeded freshness threshold or boot ID mismatched."
+    },
+    "conflicting_evidence": {
+      "type": "boolean",
+      "description": "Flag indicating whether conflicting signals (e.g. elevated PSI without latency elevation) were detected."
+    },
+    "diagnosis": {
+      "type": "object",
+      "required": [
+        "label",
+        "evidence",
+        "limitations"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "enum": [
+            "cpu_contention_candidate",
+            "rx_activity_skew_candidate",
+            "interrupt_pressure_candidate",
+            "uncertain",
+            "normal"
+          ],
+          "description": "Candidate root-cause hypothesis. Strictly non-causal."
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Heuristic confidence score (0.0 to 1.0) or null if uncalibrated."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific quantitative conditions and thresholds satisfied."
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Assumptions, unmonitored factors, and caveats restricting the diagnosis."
+        }
+      },
+      "additionalProperties": true
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "type",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "no_op",
+            "cpu_weight",
+            "rps_manual_recommendation"
+          ],
+          "description": "Mitigation control action selected."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_attempted",
+            "dry_run",
+            "applied",
+            "failed",
+            "rolled_back"
+          ],
+          "description": "Execution status. 'applied' is strictly prohibited in observe_only or dry_run modes."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Operational rationale explaining why the action was selected or inhibited."
+        },
+        "before": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "State of system setting captured immediately prior to action."
+        },
+        "requested": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Target setting requested by the controller policy."
+        },
+        "after": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Verified system setting read back from kernel/systemd after application."
+        },
+        "rollback_attempted": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether rollback to the original setting was attempted."
+        },
+        "rollback_verified": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether readback confirmed setting returned to exact baseline value."
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Error details if command execution, verification, or rollback failed."
+        }
+      },
+      "additionalProperties": true
+    },
+    "p99_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Summary P99 latency from the associated client window."
+    },
+    "throughput_rps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Summary throughput from the associated client window."
+    },
+    "cpu_psi_some_avg10_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Summary CPU PSI some avg10 from the associated host snapshot."
+    },
+    "controller_mode": {
+      "type": "string",
+      "enum": [
+        "observe_only",
+        "dry_run",
+        "apply"
+      ],
+      "description": "Active operational mode of the controller daemon."
+    }
+  },
+  "additionalProperties": true
+}

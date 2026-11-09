@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "mode": "observe_only",
+  "p99_target_ms": null,
+  "cpu_psi_some_avg10_threshold_pct": null,
+  "rx_activity_skew_candidate_threshold": 0.75,
+  "min_net_rx_events_per_window": 200,
+  "required_consecutive_windows": 3,
+  "cooldown_seconds": 30,
+  "max_client_report_age_seconds": 15,
+  "cpu_weight_baseline": 100,
+  "cpu_weight_step": 200,
+  "allowed_cpu_weights": [100, 200],
+  "auto_apply_rps": false,
+  "auto_tune_irq": false,
+  "notes": "Calibrate p99 and CPU PSI thresholds from baseline runs. Null means the project has not yet registered a threshold. Never enable actions until preconditions and rollback are verified."
+}
