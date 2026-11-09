@@ -113,26 +113,39 @@
       ],
       "items": {
         "type": "object",
-        "required": ["cpu_id", "delta"],
+        "required": ["cpu_id", "delta", "reason"],
         "properties": {
           "cpu_id": {
             "type": "integer",
             "minimum": 0
-          },
-          "delta": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
       },
       "description": "Incremental NET_RX softIRQ events per CPU during the interval (host-wide, not per-flow attributed)."
     },
@@ -143,26 +156,39 @@
       ],
       "items": {
         "type": "object",
-        "required": ["cpu_id", "delta"],
+        "required": ["cpu_id", "delta", "reason"],
         "properties": {
           "cpu_id": {
             "type": "integer",
             "minimum": 0
-          },
-          "delta": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
       },
       "description": "Incremental NET_TX softIRQ events per CPU during the interval (host-wide, not per-flow attributed)."
     },
@@ -173,26 +199,39 @@
       ],
       "items": {
         "type": "object",
-        "required": ["cpu_id", "delta"],
+        "required": ["cpu_id", "delta", "reason"],
         "properties": {
           "cpu_id": {
             "type": "integer",
             "minimum": 0
-          },
-          "delta": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
       },
       "description": "Incremental packets processed by softnet backlog per CPU."
     },
@@ -203,26 +242,39 @@
       ],
       "items": {
         "type": "object",
-        "required": ["cpu_id", "delta"],
+        "required": ["cpu_id", "delta", "reason"],
         "properties": {
           "cpu_id": {
             "type": "integer",
             "minimum": 0
-          },
-          "delta": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
       },
       "description": "Incremental frames dropped by softnet backlog (overflow of netdev_max_backlog)."
     },
@@ -233,26 +285,39 @@
       ],
       "items": {
         "type": "object",
-        "required": ["cpu_id", "delta"],
+        "required": ["cpu_id", "delta", "reason"],
         "properties": {
           "cpu_id": {
             "type": "integer",
             "minimum": 0
-          },
-          "delta": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "minimum": 0
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
-        }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
       },
       "description": "Incremental NAPI budget exhaustion events (time-squeeze) per CPU."
     },

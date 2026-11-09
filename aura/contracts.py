@@ -227,7 +227,7 @@ def check_monotonic_freshness(
 
     age_s = float(server_monotonic_now - report_monotonic_s)
     if age_s < 0.0:
-        return True, age_s, "future_monotonic_timestamp"
+        return True, None, "future_monotonic_timestamp"
 
     if age_s > max_report_age_s:
         return True, age_s, "report_age_exceeded"
@@ -271,13 +271,46 @@ def stamp_ingress_payload(
     return enriched
 
 
-def validate_action_guardrails(controller_mode: str, action_status: str) -> None:
-    """Validate operational safety constraint: 'applied' is forbidden in observe_only or dry_run.
+def validate_action_guardrails(
+    controller_mode: str,
+    action_status: str,
+    before: dict[str, Any] | None = None,
+    requested: dict[str, Any] | None = None,
+    after: dict[str, Any] | None = None,
+) -> None:
+    """Validate operational safety constraint and readback verification for actions.
+
+    Invariants:
+        1. 'applied' is strictly prohibited under 'observe_only' or 'dry_run' modes.
+        2. When action_status == 'applied':
+           - before, requested, and after must be non-null dictionaries.
+           - requested dictionary must not be empty.
+           - verified after-state must match the requested state for all requested keys.
 
     Raises:
-        ValueError: If action_status == 'applied' under observe_only or dry_run modes.
+        ValueError: If mode prohibits applied status, or if applied evidence is missing/mismatched.
+        TypeError: If evidence parameters are not dictionaries when required.
     """
     if controller_mode in ("observe_only", "dry_run") and action_status == "applied":
         raise ValueError(
             f"Operational safety violation: action status 'applied' is strictly prohibited in '{controller_mode}' mode."
         )
+
+    if action_status == "applied":
+        if before is None or requested is None or after is None:
+            raise ValueError(
+                "Applied action evidence violation: 'before', 'requested', and 'after' must all be non-null records."
+            )
+        if (
+            not isinstance(before, dict)
+            or not isinstance(requested, dict)
+            or not isinstance(after, dict)
+        ):
+            raise TypeError("before, requested, and after must be dictionary records.")
+        if not requested:
+            raise ValueError("Applied action requested configuration cannot be empty.")
+        for key, req_val in requested.items():
+            if key not in after or after[key] != req_val:
+                raise ValueError(
+                    f"Applied action verification mismatch: key '{key}' has after value '{after.get(key)}', expected '{req_val}'."
+                )

@@ -485,7 +485,7 @@ def test_monotonic_freshness_boot_continuity() -> None:
     assert age_s == 30.0
     assert reason == "report_age_exceeded"
 
-    # Future monotonic timestamp -> stale
+    # Future monotonic timestamp -> stale and report_age_s is None
     is_stale, age_s, reason = check_monotonic_freshness(
         server_monotonic_now=90.0,
         report_monotonic_s=100.0,
@@ -494,6 +494,7 @@ def test_monotonic_freshness_boot_continuity() -> None:
         max_report_age_s=15.0,
     )
     assert is_stale is True
+    assert age_s is None
     assert reason == "future_monotonic_timestamp"
 
 
@@ -639,16 +640,144 @@ def test_rejection_of_applied_action_in_dry_run_mode() -> None:
 
 
 def test_valid_action_record_under_apply_mode() -> None:
-    """Verify action status 'applied' is permitted only under 'apply' mode."""
+    """Verify action status 'applied' is permitted only under 'apply' mode with valid readback evidence."""
     schema = load_schema("action_record.schema.json")
     record = load_example("action_record.example.json")
 
     record["controller_mode"] = "apply"
     record["action"]["status"] = "applied"
+    record["action"]["before"] = {"aura-app.slice": 100}
+    record["action"]["requested"] = {"aura-app.slice": 200}
     record["action"]["after"] = {"aura-app.slice": 200}
     record["action"]["rollback_attempted"] = False
     record["action"]["rollback_verified"] = False
 
     # Valid under apply mode
     jsonschema.validate(instance=record, schema=schema, cls=Draft202012Validator)
-    validate_action_guardrails("apply", "applied")
+    validate_action_guardrails(
+        controller_mode="apply",
+        action_status="applied",
+        before=record["action"]["before"],
+        requested=record["action"]["requested"],
+        after=record["action"]["after"],
+    )
+
+
+@pytest.mark.parametrize("schema_name,example_name", [
+    ("action_record.schema.json", "action_record.example.json"),
+    ("controller_event.schema.json", "controller_event.example.json"),
+])
+def test_applied_action_schema_rejects_null_evidence(schema_name: str, example_name: str) -> None:
+    """Schema test: verify action status 'applied' strictly rejects null before, requested, or after."""
+    schema = load_schema(schema_name)
+    record = load_example(example_name)
+    record["controller_mode"] = "apply"
+    record["action"]["status"] = "applied"
+    record["action"]["before"] = {"aura-app.slice": 100}
+    record["action"]["requested"] = {"aura-app.slice": 200}
+    record["action"]["after"] = {"aura-app.slice": 200}
+
+    # Null before must fail
+    bad_before = dict(record)
+    bad_before["action"] = dict(record["action"])
+    bad_before["action"]["before"] = None
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_before, schema=schema, cls=Draft202012Validator)
+
+    # Null requested must fail
+    bad_requested = dict(record)
+    bad_requested["action"] = dict(record["action"])
+    bad_requested["action"]["requested"] = None
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_requested, schema=schema, cls=Draft202012Validator)
+
+    # Null after must fail
+    bad_after = dict(record)
+    bad_after["action"] = dict(record["action"])
+    bad_after["action"]["after"] = None
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_after, schema=schema, cls=Draft202012Validator)
+
+
+def test_applied_action_semantic_validation_rejects_mismatched_after_state() -> None:
+    """Semantic test: verify validate_action_guardrails rejects unverified or mismatched after state."""
+    before = {"aura-app.slice": 100}
+    requested = {"aura-app.slice": 200}
+
+    # Missing evidence
+    with pytest.raises(ValueError, match="Applied action evidence violation"):
+        validate_action_guardrails("apply", "applied", before=None, requested=requested, after=requested)
+
+    with pytest.raises(ValueError, match="Applied action evidence violation"):
+        validate_action_guardrails("apply", "applied", before=before, requested=None, after=requested)
+
+    with pytest.raises(ValueError, match="Applied action evidence violation"):
+        validate_action_guardrails("apply", "applied", before=before, requested=requested, after=None)
+
+    # Empty requested
+    with pytest.raises(ValueError, match="requested configuration cannot be empty"):
+        validate_action_guardrails("apply", "applied", before=before, requested={}, after={})
+
+    # Mismatched value in after state (system setting failed to update)
+    mismatched_after = {"aura-app.slice": 100}
+    with pytest.raises(ValueError, match="Applied action verification mismatch"):
+        validate_action_guardrails("apply", "applied", before=before, requested=requested, after=mismatched_after)
+
+    # Missing key in after state
+    missing_key_after = {"other.slice": 200}
+    with pytest.raises(ValueError, match="Applied action verification mismatch"):
+        validate_action_guardrails("apply", "applied", before=before, requested=requested, after=missing_key_after)
+
+    # Valid matching after state passes
+    matching_after = {"aura-app.slice": 200, "aura-bg.slice": 100}
+    validate_action_guardrails("apply", "applied", before=before, requested=requested, after=matching_after)
+
+
+@pytest.mark.parametrize("delta_field", [
+    "net_rx_softirq_delta_per_cpu",
+    "net_tx_softirq_delta_per_cpu",
+    "softnet_processed_delta_per_cpu",
+    "softnet_dropped_delta_per_cpu",
+    "softnet_time_squeeze_delta_per_cpu",
+])
+def test_per_cpu_delta_reason_contract_rules(delta_field: str) -> None:
+    """Verify per-CPU delta schemas strictly enforce reason invariants across all softnet and IRQ fields:
+    - delta=null requires non-empty reason string.
+    - numeric delta requires reason=null.
+    """
+    schema = load_schema("host_snapshot.schema.json")
+    base_snapshot = load_example("host_snapshot.example.json")
+
+    # 1. Valid numeric delta with reason=null must pass
+    valid_numeric = dict(base_snapshot)
+    valid_numeric[delta_field] = [{"cpu_id": 0, "delta": 100, "reason": None}]
+    jsonschema.validate(instance=valid_numeric, schema=schema, cls=Draft202012Validator)
+
+    # 2. Valid null delta with non-empty reason must pass
+    valid_null = dict(base_snapshot)
+    valid_null[delta_field] = [{"cpu_id": 0, "delta": None, "reason": "counter_reset_detected"}]
+    jsonschema.validate(instance=valid_null, schema=schema, cls=Draft202012Validator)
+
+    # 3. Negative: Null delta with missing reason must fail
+    missing_reason = dict(base_snapshot)
+    missing_reason[delta_field] = [{"cpu_id": 0, "delta": None}]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=missing_reason, schema=schema, cls=Draft202012Validator)
+
+    # 4. Negative: Null delta with reason=null must fail
+    null_reason_for_null_delta = dict(base_snapshot)
+    null_reason_for_null_delta[delta_field] = [{"cpu_id": 0, "delta": None, "reason": None}]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=null_reason_for_null_delta, schema=schema, cls=Draft202012Validator)
+
+    # 5. Negative: Numeric delta with a non-null reason must fail
+    non_null_reason_for_numeric = dict(base_snapshot)
+    non_null_reason_for_numeric[delta_field] = [{"cpu_id": 0, "delta": 100, "reason": "unexpected"}]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=non_null_reason_for_numeric, schema=schema, cls=Draft202012Validator)
+
+    # 6. Negative: Null delta with empty string reason must fail
+    empty_reason = dict(base_snapshot)
+    empty_reason[delta_field] = [{"cpu_id": 0, "delta": None, "reason": ""}]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=empty_reason, schema=schema, cls=Draft202012Validator)

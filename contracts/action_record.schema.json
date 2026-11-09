@@ -219,6 +219,31 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "properties": {
+              "status": { "const": "applied" }
+            },
+            "required": ["status"]
+          }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "before": { "type": "object" },
+              "requested": { "type": "object" },
+              "after": { "type": "object" }
+            },
+            "required": ["before", "requested", "after"]
+          }
+        }
+      }
     }
   ],
   "additionalProperties": true
