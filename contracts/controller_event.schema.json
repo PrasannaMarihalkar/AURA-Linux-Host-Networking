@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AURA controller event v1.2",
+  "description": "Controller evaluation record. Status 'applied' is strictly prohibited in observe_only and dry_run modes.",
   "type": "object",
   "required": [
     "schema_version",
@@ -209,5 +210,25 @@
       "description": "Active operational mode of the controller daemon."
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "controller_mode": { "enum": ["observe_only", "dry_run"] }
+        }
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "status": {
+                "not": { "const": "applied" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": true
 }

@@ -4,9 +4,6 @@
   "window_id": 1,
   "scenario": "baseline",
   "client_timestamp_epoch_s": 1794230000.125,
-  "server_received_at_epoch_s": 1794230000.15,
-  "server_received_at_monotonic_s": 1420.55,
-  "server_boot_id": "b7a8d50f-e25c-4861-9c12-32b78912e541",
   "window_duration_s": 10.0,
   "requests": 5000,
   "successes": 4998,
@@ -22,6 +19,6 @@
   "workers": 16,
   "metadata": {
     "client_hostname": "aura-client-akash",
-    "target_url": "http://192.168.1.100:8080/work"
+    "target_url": "http://192.0.2.10:8080/work"
   }
 }

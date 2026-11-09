@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AURA client measurement window (server ingested) v1.2",
+  "description": "Server-enriched measurement window. Produced after validating ingress payload and stamping receipt clock and boot identity.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "window_id",
+    "scenario",
+    "client_timestamp_epoch_s",
+    "server_received_at_epoch_s",
+    "server_received_at_monotonic_s",
+    "server_boot_id",
+    "window_duration_s",
+    "requests",
+    "successes",
+    "errors",
+    "sample_count",
+    "throughput_rps",
+    "p50_ms",
+    "p95_ms",
+    "p99_ms",
+    "p999_ms",
+    "p99_status",
+    "p999_status",
+    "workers"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.2"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for the benchmark execution."
+    },
+    "window_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing sequence number for the measurement window."
+    },
+    "scenario": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Benchmark scenario identifier (e.g. baseline, cpu_contention)."
+    },
+    "client_timestamp_epoch_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Client wall-clock epoch timestamp at window close. Metadata only; never used for freshness."
+    },
+    "server_received_at_epoch_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Server wall-clock epoch timestamp recorded at ingestion. Audit and logging only."
+    },
+    "server_received_at_monotonic_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Server monotonic timestamp (time.monotonic()) recorded at ingestion. Used for controller freshness."
+    },
+    "server_boot_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Server Linux boot identity UUID (/proc/sys/kernel/random/boot_id). Guarantees monotonic validity."
+    },
+    "window_duration_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Strictly positive finite duration of the measurement window in seconds."
+    },
+    "requests": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total HTTP requests reaching terminal outcome in this window (requests = successes + errors)."
+    },
+    "successes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "HTTP requests completing with terminal HTTP 200 within timeout."
+    },
+    "errors": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "HTTP requests terminating in failure (timeouts, RST, connection refusals, non-200 HTTP codes)."
+    },
+    "sample_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of successful requests with valid measured monotonic latency samples (sample_count <= successes)."
+    },
+    "throughput_rps": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Successful request rate over elapsed window: successes / window_duration_s."
+    },
+    "p50_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "50th percentile (median) successful-response latency in milliseconds using nearest-rank."
+    },
+    "p95_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "95th percentile successful-response latency in milliseconds using nearest-rank."
+    },
+    "p99_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "99th percentile successful-response latency in milliseconds using nearest-rank."
+    },
+    "p999_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "99.9th percentile successful-response latency in milliseconds using nearest-rank."
+    },
+    "p99_status": {
+      "type": "string",
+      "enum": [
+        "insufficient",
+        "exploratory",
+        "minimum_tail_count_met"
+      ],
+      "description": "Sufficiency status for P99 reporting: minimum_tail_count_met (>=10,000 samples), exploratory (>=100 samples), insufficient (<100 samples)."
+    },
+    "p999_status": {
+      "type": "string",
+      "enum": [
+        "insufficient",
+        "exploratory",
+        "minimum_tail_count_met"
+      ],
+      "description": "Sufficiency status for P99.9 reporting: minimum_tail_count_met (>=100,000 samples), exploratory (>=1,000 samples), insufficient (<1,000 samples)."
+    },
+    "workers": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of concurrent client worker threads generating load."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional run metadata (e.g. client machine hostname, commit SHA)."
+    }
+  },
+  "additionalProperties": true
+}

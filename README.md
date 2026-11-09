@@ -59,12 +59,13 @@ AURA-Linux-Host-Networking/
 ├── config/               # Threshold and configuration parameters
 │   └── thresholds.json   # Latency and pressure thresholds
 ├── contracts/            # Frozen JSON schemas and contract rules
-│   ├── client_window.schema.json
-│   ├── host_snapshot.schema.json
-│   ├── controller_event.schema.json
-│   ├── action_record.schema.json
-│   ├── CONTRACT_RULES.md
-│   └── examples/         # Conforming sample JSON records
+│   ├── client_window.schema.json           # Ingress client window schema
+│   ├── client_window_ingested.schema.json  # Server-enriched window schema
+│   ├── host_snapshot.schema.json          # Host telemetry snapshot schema
+│   ├── controller_event.schema.json       # Controller event log schema
+│   ├── action_record.schema.json          # Guarded mitigation action schema
+│   ├── CONTRACT_RULES.md                  # Normative specifications
+│   └── examples/                          # Valid JSON sample fixtures
 ├── docs/                 # Architectural and research documentation
 │   ├── architecture/
 │   ├── research/
@@ -79,16 +80,16 @@ AURA-Linux-Host-Networking/
 
 ## 5. Development Quickstart
 
-AURA core runtime uses the Python standard library. Development dependencies (`pytest`, `jsonschema`) are declared in `requirements-dev.txt`.
+AURA core runtime uses the Python standard library. Development and testing dependencies (`pytest`, `jsonschema`) are declared in `requirements-dev.txt`.
 
 ```bash
 # 1. Install development dependencies
 pip install -r requirements-dev.txt
 
-# 2. Syntax check
+# 2. Syntax check across all modules
 python3 -m compileall -q aura analysis tests
 
-# 3. Run test suite using pytest
+# 3. Run unit and contract test suite using pytest
 python3 -m pytest -v tests/
 
 # 4. Validate all contract schemas and examples individually

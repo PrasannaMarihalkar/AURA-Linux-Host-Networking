@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AURA client measurement window v1.2",
+  "title": "AURA client measurement window (ingress) v1.2",
+  "description": "Client-emitted ingress window payload. Must not contain server receipt timestamps or boot identity.",
   "type": "object",
   "required": [
     "schema_version",
@@ -47,33 +48,10 @@
       "minimum": 0,
       "description": "Client wall-clock epoch timestamp at window close. Metadata only; never used for freshness."
     },
-    "server_received_at_epoch_s": {
-      "type": [
-        "number",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Server wall-clock epoch timestamp recorded at ingestion. Stamped by server; audit and logging only."
-    },
-    "server_received_at_monotonic_s": {
-      "type": [
-        "number",
-        "null"
-      ],
-      "minimum": 0,
-      "description": "Server monotonic timestamp (time.monotonic()) recorded at ingestion. Stamped by server for controller freshness."
-    },
-    "server_boot_id": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "Server Linux boot identity UUID (/proc/sys/kernel/random/boot_id). Stamped by server to ensure monotonic validity."
-    },
     "window_duration_s": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "Strictly positive duration of the measurement window in seconds."
+      "description": "Strictly positive finite duration of the measurement window in seconds."
     },
     "requests": {
       "type": "integer",
@@ -93,7 +71,7 @@
     "sample_count": {
       "type": "integer",
       "minimum": 0,
-      "description": "Number of successful requests with valid measured monotonic latency samples (sample_count == successes)."
+      "description": "Number of successful requests with valid measured monotonic latency samples (sample_count <= successes)."
     },
     "throughput_rps": {
       "type": "number",
@@ -106,7 +84,7 @@
         "null"
       ],
       "minimum": 0,
-      "description": "50th percentile (median) successful-response latency in milliseconds."
+      "description": "50th percentile (median) successful-response latency in milliseconds using nearest-rank."
     },
     "p95_ms": {
       "type": [
@@ -114,7 +92,7 @@
         "null"
       ],
       "minimum": 0,
-      "description": "95th percentile successful-response latency in milliseconds."
+      "description": "95th percentile successful-response latency in milliseconds using nearest-rank."
     },
     "p99_ms": {
       "type": [
@@ -122,7 +100,7 @@
         "null"
       ],
       "minimum": 0,
-      "description": "99th percentile successful-response latency in milliseconds."
+      "description": "99th percentile successful-response latency in milliseconds using nearest-rank."
     },
     "p999_ms": {
       "type": [
@@ -130,7 +108,7 @@
         "null"
       ],
       "minimum": 0,
-      "description": "99.9th percentile successful-response latency in milliseconds."
+      "description": "99.9th percentile successful-response latency in milliseconds using nearest-rank."
     },
     "p99_status": {
       "type": "string",
@@ -159,6 +137,13 @@
       "type": "object",
       "description": "Optional run metadata (e.g. client machine hostname, commit SHA)."
     }
+  },
+  "not": {
+    "anyOf": [
+      { "required": ["server_received_at_epoch_s"] },
+      { "required": ["server_received_at_monotonic_s"] },
+      { "required": ["server_boot_id"] }
+    ]
   },
   "additionalProperties": true
 }
