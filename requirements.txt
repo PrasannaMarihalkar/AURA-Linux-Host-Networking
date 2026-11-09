@@ -1,3 +1,3 @@
 # AURA Core Runtime Dependencies
-# Core AURA runtime relies strictly on the Python 3 standard library.
-# No third-party pip dependencies are required for baseline execution.
+# Used by the HTTP server and controller to validate data interchange contracts (Draft 2020-12).
+jsonschema>=4.20.0

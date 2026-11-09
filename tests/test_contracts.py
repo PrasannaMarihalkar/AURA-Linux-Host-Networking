@@ -1,24 +1,35 @@
-"""Unit and semantic specification tests for AURA shared JSON contracts and schemas.
+"""Comprehensive unit and semantic specification tests for AURA shared JSON contracts.
 
-Covers Gate A semantic freeze specifications:
-- JSON Schema Draft 2020-12 validation for all schemas and examples
-- Ingress vs Ingested two-stage client window contracts
-- Client benchmark invariants: requests = successes + errors, sample_count <= successes
-- Nearest-rank percentile calculation and sample ordering
-- P99 and P99.9 reporting guardrail transitions
-- Server ingestion stamping, monotonic freshness, and boot identity verification
-- Host telemetry counter deltas, CPU PSI 'some' preservation, resets, and hotplug
-- Operational action safety guardrails: strict prohibition of 'applied' in observe/dry-run modes
+Tests cover Gate A semantic freeze specifications:
+- JSON Schema Draft 2020-12 metaschema compliance for all schemas and fixtures.
+- Strict rejection of JSON constants (NaN, Infinity, -Infinity).
+- Client window invariants (requests = successes + errors, sample_count <= successes, throughput).
+- Nearest-rank percentile calculation and sample ordering across boundary conditions.
+- Reporting guardrails for tail percentiles (p99_status, p999_status).
+- Two-stage ingestion: strict rejection of server fields on ingress, required fields on enriched.
+- Monotonic clock freshness and server boot identity continuity verification.
+- Host telemetry counter deltas, CPU PSI 'some' preservation, structured missing_fields.
+- Operational action safety guardrails: strict prohibition of 'applied' in observe/dry-run modes.
 """
 from __future__ import annotations
 
 import json
 import math
+import random
 import uuid
 from pathlib import Path
 import pytest
 import jsonschema
 from jsonschema import Draft202012Validator
+
+from aura.contracts import (
+    calculate_nearest_rank_percentile,
+    evaluate_tail_statuses,
+    validate_client_window_invariants,
+    check_monotonic_freshness,
+    stamp_ingress_payload,
+    validate_action_guardrails,
+)
 
 CONTRACTS_DIR = Path(__file__).resolve().parent.parent / "contracts"
 EXAMPLES_DIR = CONTRACTS_DIR / "examples"
@@ -100,7 +111,7 @@ def test_action_record_example_valid() -> None:
 # ============================================================================
 
 def test_json_rejects_nan_and_infinity() -> None:
-    """Ensure JSON parser rejects NaN and Infinity constants."""
+    """Ensure JSON parser strictly rejects NaN and Infinity constants."""
     def _reject_constant(val: str) -> None:
         raise ValueError(f"Forbidden constant: {val}")
 
@@ -115,192 +126,223 @@ def test_json_rejects_nan_and_infinity() -> None:
 
 
 # ============================================================================
-# 3. Client Benchmark Semantic Contract Tests
+# 3. Client Benchmark Semantic Invariants & Negative Cases
 # ============================================================================
 
-def test_requests_equals_successes_plus_errors() -> None:
-    """Verify requests = successes + errors invariant."""
+def test_requests_equals_successes_plus_errors_valid() -> None:
+    """Verify requests = successes + errors holds for example."""
     example = load_example("client_window_ingress.example.json")
-    assert example["requests"] == example["successes"] + example["errors"], (
-        f"Invariant broken: {example['requests']} != {example['successes']} + {example['errors']}"
+    validate_client_window_invariants(
+        requests=example["requests"],
+        successes=example["successes"],
+        errors=example["errors"],
+        sample_count=example["sample_count"],
+        window_duration_s=example["window_duration_s"],
+        throughput_rps=example["throughput_rps"],
     )
 
 
-def test_sample_count_less_than_or_equal_to_successes() -> None:
-    """Verify sample_count <= successes invariant."""
-    example = load_example("client_window_ingress.example.json")
-    assert example["sample_count"] <= example["successes"], "sample_count must be <= successes"
-
-    # Edge case: partial measurement where some successful requests had dropped timers
-    partial_example = dict(example)
-    partial_example["sample_count"] = partial_example["successes"] - 10
-    assert partial_example["sample_count"] <= partial_example["successes"]
-
-
-def test_throughput_calculation() -> None:
-    """Verify throughput_rps = successes / window_duration_s."""
-    example = load_example("client_window_ingress.example.json")
-    expected_throughput = example["successes"] / example["window_duration_s"]
-    assert pytest.approx(example["throughput_rps"], rel=1e-3) == expected_throughput
+def test_requests_mismatch_negative_case() -> None:
+    """Negative test: verify requests != successes + errors is rejected."""
+    with pytest.raises(ValueError, match="Invariant violation: requests"):
+        validate_client_window_invariants(
+            requests=5000,
+            successes=4900,
+            errors=50,  # 4900 + 50 = 4950 != 5000
+            sample_count=4900,
+            window_duration_s=10.0,
+            throughput_rps=490.0,
+        )
 
 
-def test_valid_duration_requirements() -> None:
-    """Verify window_duration_s must be finite and strictly positive (> 0)."""
-    schema = load_schema("client_window.schema.json")
-    example = load_example("client_window_ingress.example.json")
+def test_sample_count_cannot_exceed_successes() -> None:
+    """Verify sample_count <= successes constraint."""
+    # Valid: sample_count == successes
+    validate_client_window_invariants(5000, 4998, 2, 4998, 10.0, 499.8)
 
-    # Zero duration must fail
-    invalid_zero = dict(example)
-    invalid_zero["window_duration_s"] = 0.0
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance=invalid_zero, schema=schema, cls=Draft202012Validator)
+    # Valid: partial sample where some successful requests had lost latency timers
+    validate_client_window_invariants(5000, 4998, 2, 4950, 10.0, 499.8)
 
-    # Negative duration must fail
-    invalid_neg = dict(example)
-    invalid_neg["window_duration_s"] = -5.0
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance=invalid_neg, schema=schema, cls=Draft202012Validator)
+    # Negative test: sample_count > successes must raise ValueError
+    with pytest.raises(ValueError, match="sample_count .* cannot exceed successes"):
+        validate_client_window_invariants(5000, 4998, 2, 5001, 10.0, 499.8)
 
 
-def nearest_rank_percentile(latencies: list[float], percentile: float) -> float:
-    """Compute nearest-rank percentile for 0 < percentile <= 1.0 using 1-indexed ceil(p * N)."""
-    if not latencies:
-        raise ValueError("Cannot calculate percentile of empty sample list")
-    if not (0.0 < percentile <= 1.0):
-        raise ValueError("Percentile must be in range (0.0, 1.0]")
+def test_throughput_calculation_with_tolerance() -> None:
+    """Verify throughput_rps = successes / window_duration_s with documented float tolerance."""
+    # Valid exact
+    validate_client_window_invariants(1000, 1000, 0, 1000, 10.0, 100.0)
 
-    sorted_latencies = sorted(latencies)
-    n = len(sorted_latencies)
-    rank = int(math.ceil(percentile * n))
-    rank_bounded = max(1, min(rank, n))
-    return sorted_latencies[rank_bounded - 1]
+    # Valid within 1e-3 relative tolerance
+    validate_client_window_invariants(1000, 1000, 0, 1000, 10.0, 100.05, tolerance=1e-3)
+
+    # Negative test: throughput mismatch beyond tolerance
+    with pytest.raises(ValueError, match="Throughput calculation mismatch"):
+        validate_client_window_invariants(1000, 1000, 0, 1000, 10.0, 150.0, tolerance=1e-3)
 
 
-def test_nearest_rank_percentile_calculation() -> None:
-    """Verify nearest-rank percentile formula: rank = ceil(p * N) 1-indexed."""
-    # 100 values from 1.0 to 100.0
+@pytest.mark.parametrize("invalid_duration", [0.0, -1.0, -10.5, float("inf"), float("-inf"), float("nan")])
+def test_invalid_duration_negative_cases(invalid_duration: float) -> None:
+    """Negative test: verify non-positive or non-finite window durations are rejected."""
+    with pytest.raises(ValueError, match="window_duration_s must be strictly positive and finite"):
+        validate_client_window_invariants(
+            requests=100,
+            successes=100,
+            errors=0,
+            sample_count=100,
+            window_duration_s=invalid_duration,
+            throughput_rps=10.0,
+        )
+
+
+# ============================================================================
+# 4. Nearest-Rank Percentile & Tail Reporting Guardrail Tests
+# ============================================================================
+
+def test_nearest_rank_percentile_boundary_and_ordering() -> None:
+    """Verify nearest-rank percentile across boundary cases and unsorted inputs."""
+    # Boundary: N = 1
+    assert calculate_nearest_rank_percentile([42.5], 0.50) == 42.5
+    assert calculate_nearest_rank_percentile([42.5], 0.99) == 42.5
+
+    # Known sequence: 100 elements (1.0 to 100.0)
     samples = [float(i) for i in range(1, 101)]
+    assert calculate_nearest_rank_percentile(samples, 0.50) == 50.0
+    assert calculate_nearest_rank_percentile(samples, 0.95) == 95.0
+    assert calculate_nearest_rank_percentile(samples, 0.99) == 99.0
+    assert calculate_nearest_rank_percentile(samples, 1.00) == 100.0
 
-    # P50 (median): ceil(0.50 * 100) = 50 -> 50.0
-    assert nearest_rank_percentile(samples, 0.50) == 50.0
-    # P95: ceil(0.95 * 100) = 95 -> 95.0
-    assert nearest_rank_percentile(samples, 0.95) == 95.0
-    # P99: ceil(0.99 * 100) = 99 -> 99.0
-    assert nearest_rank_percentile(samples, 0.99) == 99.0
-
-    # Non-integer rank: 10 samples, P95: ceil(0.95 * 10) = ceil(9.5) = 10 -> 10th element
-    small_samples = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
-    assert nearest_rank_percentile(small_samples, 0.95) == 100.0
-
-    # Test sample ordering invariant (unsorted input produces identical result)
-    import random
+    # Unsorted input produces identical deterministic result
     shuffled = list(samples)
-    random.seed(42)
+    random.seed(12345)
     random.shuffle(shuffled)
-    assert nearest_rank_percentile(shuffled, 0.99) == 99.0
+    assert calculate_nearest_rank_percentile(shuffled, 0.99) == 99.0
 
+    # Non-integer rank: N = 10, P95: ceil(0.95 * 10) = ceil(9.5) = 10 -> 10th sample
+    small_samples = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+    assert calculate_nearest_rank_percentile(small_samples, 0.95) == 10.0
 
-def evaluate_tail_statuses(sample_count: int) -> tuple[str, str]:
-    """Helper implementing AURA reporting guardrails for P99 and P99.9."""
-    if sample_count >= 10_000:
-        p99 = "minimum_tail_count_met"
-    elif sample_count >= 100:
-        p99 = "exploratory"
-    else:
-        p99 = "insufficient"
-
-    if sample_count >= 100_000:
-        p999 = "minimum_tail_count_met"
-    elif sample_count >= 1_000:
-        p999 = "exploratory"
-    else:
-        p999 = "insufficient"
-
-    return p99, p999
+    # Negative cases: invalid percentiles
+    with pytest.raises(ValueError, match="Percentile must be in"):
+        calculate_nearest_rank_percentile(samples, 0.0)
+    with pytest.raises(ValueError, match="Percentile must be in"):
+        calculate_nearest_rank_percentile(samples, 1.05)
+    with pytest.raises(ValueError, match="Cannot calculate percentile from an empty"):
+        calculate_nearest_rank_percentile([], 0.50)
 
 
 def test_p99_and_p999_status_transitions() -> None:
-    """Verify P99 and P99.9 reporting guardrail threshold transitions."""
-    # Under 100 samples
-    assert evaluate_tail_statuses(50) == ("insufficient", "insufficient")
-    # Between 100 and 999 samples
-    assert evaluate_tail_statuses(500) == ("exploratory", "insufficient")
-    # Between 1,000 and 9,999 samples
-    assert evaluate_tail_statuses(5000) == ("exploratory", "exploratory")
-    # Between 10,000 and 99,999 samples
-    assert evaluate_tail_statuses(25000) == ("minimum_tail_count_met", "exploratory")
-    # 100,000+ samples
-    assert evaluate_tail_statuses(150000) == ("minimum_tail_count_met", "minimum_tail_count_met")
+    """Verify P99 and P99.9 reporting guardrail threshold transitions at every boundary."""
+    # Boundary: sample_count < 100
+    assert evaluate_tail_statuses(0) == ("insufficient", "insufficient")
+    assert evaluate_tail_statuses(99) == ("insufficient", "insufficient")
+
+    # Boundary: 100 <= sample_count < 1,000
+    assert evaluate_tail_statuses(100) == ("exploratory", "insufficient")
+    assert evaluate_tail_statuses(999) == ("exploratory", "insufficient")
+
+    # Boundary: 1,000 <= sample_count < 10,000
+    assert evaluate_tail_statuses(1000) == ("exploratory", "exploratory")
+    assert evaluate_tail_statuses(4998) == ("exploratory", "exploratory")
+    assert evaluate_tail_statuses(9999) == ("exploratory", "exploratory")
+
+    # Boundary: 10,000 <= sample_count < 100,000
+    assert evaluate_tail_statuses(10000) == ("minimum_tail_count_met", "exploratory")
+    assert evaluate_tail_statuses(99999) == ("minimum_tail_count_met", "exploratory")
+
+    # Boundary: sample_count >= 100,000
+    assert evaluate_tail_statuses(100000) == ("minimum_tail_count_met", "minimum_tail_count_met")
+    assert evaluate_tail_statuses(250000) == ("minimum_tail_count_met", "minimum_tail_count_met")
 
 
 def test_sample_status_for_4998_example() -> None:
     """Verify the 4,998 successful sample example has 'exploratory' for both P99 and P99.9."""
     example = load_example("client_window_ingress.example.json")
     assert example["sample_count"] == 4998
-    assert example["p99_status"] == "exploratory"
-    assert example["p999_status"] == "exploratory"
+    p99_status, p999_status = evaluate_tail_statuses(example["sample_count"])
+    assert p99_status == "exploratory"
+    assert p999_status == "exploratory"
+    assert example["p99_status"] == p99_status
+    assert example["p999_status"] == p999_status
 
 
 # ============================================================================
-# 4. Two-Stage Ingestion, Monotonic Freshness & Boot ID Tests
+# 5. Two-Stage Ingestion Schema Rejection & Stamping Tests
 # ============================================================================
 
-def test_rejection_of_client_supplied_server_receipt_metadata() -> None:
-    """Verify ingress schema strictly rejects client payloads that inject server receipt fields."""
+def test_client_ingress_rejects_server_owned_fields() -> None:
+    """Negative tests: verify ingress schema strictly rejects any server-owned receipt metadata."""
     ingress_schema = load_schema("client_window.schema.json")
     example = load_example("client_window_ingress.example.json")
 
-    # Injecting server_received_at_epoch_s into ingress must fail
-    invalid_epoch = dict(example)
-    invalid_epoch["server_received_at_epoch_s"] = 1794230000.0
+    # Reject server_received_at_epoch_s
+    bad_epoch = dict(example)
+    bad_epoch["server_received_at_epoch_s"] = 1794230000.0
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance=invalid_epoch, schema=ingress_schema, cls=Draft202012Validator)
+        jsonschema.validate(instance=bad_epoch, schema=ingress_schema, cls=Draft202012Validator)
 
-    # Injecting server_received_at_monotonic_s into ingress must fail
-    invalid_mono = dict(example)
-    invalid_mono["server_received_at_monotonic_s"] = 1420.0
+    # Reject server_received_at_monotonic_s
+    bad_mono = dict(example)
+    bad_mono["server_received_at_monotonic_s"] = 1420.0
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance=invalid_mono, schema=ingress_schema, cls=Draft202012Validator)
+        jsonschema.validate(instance=bad_mono, schema=ingress_schema, cls=Draft202012Validator)
 
-    # Injecting server_boot_id into ingress must fail
-    invalid_boot = dict(example)
-    invalid_boot["server_boot_id"] = str(uuid.uuid4())
+    # Reject server_boot_id
+    bad_boot = dict(example)
+    bad_boot["server_boot_id"] = str(uuid.uuid4())
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(instance=invalid_boot, schema=ingress_schema, cls=Draft202012Validator)
+        jsonschema.validate(instance=bad_boot, schema=ingress_schema, cls=Draft202012Validator)
+
+    # Reject all three
+    bad_all = dict(example)
+    bad_all["server_received_at_epoch_s"] = 1794230000.0
+    bad_all["server_received_at_monotonic_s"] = 1420.0
+    bad_all["server_boot_id"] = str(uuid.uuid4())
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=bad_all, schema=ingress_schema, cls=Draft202012Validator)
 
 
-def stamp_ingestion(
-    ingress_payload: dict,
-    server_epoch_s: float,
-    server_monotonic_s: float,
-    server_boot_id: str,
-) -> dict:
-    """Contract helper: validates ingress payload and enriches with server receipt metadata."""
-    ingress_schema = load_schema("client_window.schema.json")
-    jsonschema.validate(instance=ingress_payload, schema=ingress_schema, cls=Draft202012Validator)
-
-    ingested_record = dict(ingress_payload)
-    ingested_record["server_received_at_epoch_s"] = server_epoch_s
-    ingested_record["server_received_at_monotonic_s"] = server_monotonic_s
-    ingested_record["server_boot_id"] = server_boot_id
-
+def test_server_ingested_schema_requires_server_fields() -> None:
+    """Negative tests: verify server-enriched schema requires all three receipt fields."""
     ingested_schema = load_schema("client_window_ingested.schema.json")
-    jsonschema.validate(instance=ingested_record, schema=ingested_schema, cls=Draft202012Validator)
-    return ingested_record
+    example = load_example("client_window_ingested.example.json")
+
+    # Missing server_received_at_epoch_s must fail
+    missing_epoch = dict(example)
+    del missing_epoch["server_received_at_epoch_s"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=missing_epoch, schema=ingested_schema, cls=Draft202012Validator)
+
+    # Missing server_received_at_monotonic_s must fail
+    missing_mono = dict(example)
+    del missing_mono["server_received_at_monotonic_s"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=missing_mono, schema=ingested_schema, cls=Draft202012Validator)
+
+    # Missing server_boot_id must fail
+    missing_boot = dict(example)
+    del missing_boot["server_boot_id"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=missing_boot, schema=ingested_schema, cls=Draft202012Validator)
 
 
-def test_server_owned_timestamp_generation_helper() -> None:
-    """Verify standalone stamp_ingestion helper validates ingress and enriches schema-compliant record."""
+def test_stamp_ingress_payload_helper() -> None:
+    """Verify pure stamp_ingress_payload helper transforms ingress to valid enriched payload."""
+    ingress_schema = load_schema("client_window.schema.json")
+    ingested_schema = load_schema("client_window_ingested.schema.json")
     ingress_record = load_example("client_window_ingress.example.json")
+
     server_epoch_now = 1794230050.123
     server_monotonic_now = 1450.456
     server_boot_id = str(uuid.uuid4())
 
-    enriched = stamp_ingestion(
-        ingress_record,
+    enriched = stamp_ingress_payload(
+        ingress_payload=ingress_record,
         server_epoch_s=server_epoch_now,
         server_monotonic_s=server_monotonic_now,
         server_boot_id=server_boot_id,
+        ingress_schema=ingress_schema,
+        ingested_schema=ingested_schema,
     )
     assert enriched["run_id"] == ingress_record["run_id"]
     assert enriched["window_id"] == ingress_record["window_id"]
@@ -309,38 +351,73 @@ def test_server_owned_timestamp_generation_helper() -> None:
     assert enriched["server_boot_id"] == server_boot_id
 
 
-def test_boot_identifier_mismatch_logic() -> None:
-    """Verify freshness calculation detects server boot ID mismatch and marks telemetry stale."""
-    active_controller_boot_id = "boot-id-server-session-A"
-    report_server_boot_id = "boot-id-server-session-B"  # Mismatch (reboot or different server)
+# ============================================================================
+# 6. Monotonic Freshness & Boot Identity Continuity Tests
+# ============================================================================
 
-    report = load_example("controller_event.example.json")
-    report["server_boot_id"] = report_server_boot_id
+def test_monotonic_freshness_boot_continuity() -> None:
+    """Verify monotonic freshness checks enforce same server boot identity."""
+    current_boot_id = "boot-session-1234"
+    diff_boot_id = "boot-session-5678"
 
-    if report["server_boot_id"] != active_controller_boot_id:
-        stale_telemetry = True
-        diagnosis_label = "uncertain"
-        action_type = "no_op"
-    else:
-        stale_telemetry = False
-        diagnosis_label = "normal"
-        action_type = "no_op"
+    # Valid: same boot id and age <= 15s -> fresh
+    is_stale, age_s, reason = check_monotonic_freshness(
+        server_monotonic_now=110.0,
+        report_monotonic_s=100.0,
+        current_server_boot_id=current_boot_id,
+        report_server_boot_id=current_boot_id,
+        max_report_age_s=15.0,
+    )
+    assert is_stale is False
+    assert age_s == 10.0
+    assert reason == "fresh"
 
-    assert stale_telemetry is True
-    assert diagnosis_label == "uncertain"
-    assert action_type == "no_op"
+    # Mismatch: different boot id -> immediately stale regardless of monotonic delta
+    is_stale, age_s, reason = check_monotonic_freshness(
+        server_monotonic_now=102.0,
+        report_monotonic_s=100.0,
+        current_server_boot_id=current_boot_id,
+        report_server_boot_id=diff_boot_id,
+        max_report_age_s=15.0,
+    )
+    assert is_stale is True
+    assert age_s is None
+    assert reason == "server_boot_id_mismatch"
+
+    # Expired age: age > 15s -> stale
+    is_stale, age_s, reason = check_monotonic_freshness(
+        server_monotonic_now=130.0,
+        report_monotonic_s=100.0,
+        current_server_boot_id=current_boot_id,
+        report_server_boot_id=current_boot_id,
+        max_report_age_s=15.0,
+    )
+    assert is_stale is True
+    assert age_s == 30.0
+    assert reason == "report_age_exceeded"
+
+    # Future monotonic timestamp -> stale
+    is_stale, age_s, reason = check_monotonic_freshness(
+        server_monotonic_now=90.0,
+        report_monotonic_s=100.0,
+        current_server_boot_id=current_boot_id,
+        report_server_boot_id=current_boot_id,
+        max_report_age_s=15.0,
+    )
+    assert is_stale is True
+    assert reason == "future_monotonic_timestamp"
 
 
 # ============================================================================
-# 5. Host Telemetry Counter Handling (Reset, Hotplug, Missing Fields)
+# 7. Host Telemetry Counter Handling (Reset, Hotplug, Missing Fields)
 # ============================================================================
 
-def test_counter_reset_handling() -> None:
-    """Verify counter rollover/reset sets delta to null and logs structured reason in missing_fields."""
+def test_counter_reset_and_structured_missing_fields() -> None:
+    """Verify counter rollover/reset sets delta to null with reason and logs structured missing_fields."""
     schema = load_schema("host_snapshot.schema.json")
     snapshot = load_example("host_snapshot.example.json")
 
-    # Simulate CPU 1 counter reset
+    # Simulate CPU 1 counter reset (e.g. counter overflow or driver reload)
     snapshot["net_rx_softirq_delta_per_cpu"] = [
         {"cpu_id": 0, "delta": 4820, "reason": None},
         {"cpu_id": 1, "delta": None, "reason": "counter_reset_detected"},
@@ -354,7 +431,7 @@ def test_counter_reset_handling() -> None:
 
 
 def test_cpu_hotplug_handling() -> None:
-    """Verify CPU hotplug core appearance or offline event is handled safely with structured reasons."""
+    """Verify CPU hotplug appearance or offline event is handled safely with structured reasons."""
     schema = load_schema("host_snapshot.schema.json")
     snapshot = load_example("host_snapshot.example.json")
 
@@ -372,21 +449,15 @@ def test_cpu_hotplug_handling() -> None:
     jsonschema.validate(instance=snapshot, schema=schema, cls=Draft202012Validator)
 
 
-def test_missing_telemetry_handling() -> None:
-    """Verify missing kernel telemetry reports null metrics and structured reasons in missing_fields."""
+def test_unstructured_missing_fields_negative_case() -> None:
+    """Negative test: verify plain string in missing_fields fails schema validation."""
     schema = load_schema("host_snapshot.schema.json")
     snapshot = load_example("host_snapshot.example.json")
 
-    snapshot["cpu_psi_some_avg10_pct"] = None
-    snapshot["cpu_psi_some_avg60_pct"] = None
-    snapshot["cpu_psi_some_avg300_pct"] = None
-    snapshot["cpu_psi_some_total_us"] = None
-    snapshot["missing_fields"].append({
-        "metric": "cpu_psi_some",
-        "reason": "kernel_file_missing"
-    })
-
-    jsonschema.validate(instance=snapshot, schema=schema, cls=Draft202012Validator)
+    # Plain string instead of structured {"metric": ..., "reason": ...}
+    snapshot["missing_fields"] = ["cpu_psi_some_avg10_pct"]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=snapshot, schema=schema, cls=Draft202012Validator)
 
 
 def test_cpu_psi_full_excluded_from_system_telemetry() -> None:
@@ -401,7 +472,7 @@ def test_cpu_psi_full_excluded_from_system_telemetry() -> None:
 
 
 # ============================================================================
-# 6. Controller Safety & Action Guardrails
+# 8. Controller Safety & Action Guardrails
 # ============================================================================
 
 def test_rejection_of_applied_action_in_observe_only_mode() -> None:
@@ -416,6 +487,10 @@ def test_rejection_of_applied_action_in_observe_only_mode() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance=record, schema=schema, cls=Draft202012Validator)
 
+    # Pure validation helper must reject
+    with pytest.raises(ValueError, match="Operational safety violation"):
+        validate_action_guardrails("observe_only", "applied")
+
 
 def test_rejection_of_applied_action_in_dry_run_mode() -> None:
     """Verify action status 'applied' is strictly rejected when controller_mode is dry_run."""
@@ -428,3 +503,23 @@ def test_rejection_of_applied_action_in_dry_run_mode() -> None:
     # Schema must reject via allOf conditional
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance=record, schema=schema, cls=Draft202012Validator)
+
+    # Pure validation helper must reject
+    with pytest.raises(ValueError, match="Operational safety violation"):
+        validate_action_guardrails("dry_run", "applied")
+
+
+def test_valid_action_record_under_apply_mode() -> None:
+    """Verify action status 'applied' is permitted only under 'apply' mode."""
+    schema = load_schema("action_record.schema.json")
+    record = load_example("action_record.example.json")
+
+    record["controller_mode"] = "apply"
+    record["action"]["status"] = "applied"
+    record["action"]["after"] = {"aura-app.slice": 200}
+    record["action"]["rollback_attempted"] = False
+    record["action"]["rollback_verified"] = False
+
+    # Valid under apply mode
+    jsonschema.validate(instance=record, schema=schema, cls=Draft202012Validator)
+    validate_action_guardrails("apply", "applied")
