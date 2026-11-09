@@ -195,6 +195,62 @@ def test_invalid_duration_negative_cases(invalid_duration: float) -> None:
         )
 
 
+def test_client_window_invariants_rejects_non_integers_and_booleans() -> None:
+    """Negative tests: verify boolean masquerading as int or float types are rejected for counts."""
+    # Boolean requests
+    with pytest.raises(TypeError, match="requests must be an integer"):
+        validate_client_window_invariants(True, 1, 0, 1, 1.0, 1.0)
+
+    # Boolean successes
+    with pytest.raises(TypeError, match="successes must be an integer"):
+        validate_client_window_invariants(1, True, 0, 1, 1.0, 1.0)
+
+    # Boolean errors
+    with pytest.raises(TypeError, match="errors must be an integer"):
+        validate_client_window_invariants(1, 1, False, 1, 1.0, 1.0)
+
+    # Boolean sample_count
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        validate_client_window_invariants(10, 10, 0, True, 1.0, 10.0)
+
+    # Float sample_count
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        validate_client_window_invariants(10, 10, 0, 10.0, 1.0, 10.0)
+
+    # Float requests
+    with pytest.raises(TypeError, match="requests must be an integer"):
+        validate_client_window_invariants(10.5, 10, 0, 10, 1.0, 10.0)
+
+
+def test_client_window_invariants_rejects_negative_counts() -> None:
+    """Negative tests: verify negative values are rejected for all count parameters."""
+    with pytest.raises(ValueError, match="requests cannot be negative"):
+        validate_client_window_invariants(-1, 0, 0, 0, 1.0, 0.0)
+
+    with pytest.raises(ValueError, match="successes cannot be negative"):
+        validate_client_window_invariants(0, -1, 1, 0, 1.0, 0.0)
+
+    with pytest.raises(ValueError, match="errors cannot be negative"):
+        validate_client_window_invariants(0, 0, -1, 0, 1.0, 0.0)
+
+    with pytest.raises(ValueError, match="sample_count cannot be negative"):
+        validate_client_window_invariants(10, 10, 0, -1, 1.0, 10.0)
+
+
+@pytest.mark.parametrize("bad_throughput", [float("nan"), float("inf"), float("-inf"), -5.0, True])
+def test_client_window_invariants_rejects_invalid_throughput(bad_throughput) -> None:
+    """Negative tests: verify non-finite, negative, or boolean throughput is rejected."""
+    with pytest.raises(ValueError, match="throughput_rps must be a finite non-negative number"):
+        validate_client_window_invariants(100, 100, 0, 100, 10.0, bad_throughput)
+
+
+@pytest.mark.parametrize("bad_tolerance", [0.0, -1e-3, float("nan"), float("inf"), True])
+def test_client_window_invariants_rejects_invalid_tolerance(bad_tolerance) -> None:
+    """Negative tests: verify non-positive, non-finite, or boolean tolerance is rejected."""
+    with pytest.raises(ValueError, match="tolerance must be a finite positive number"):
+        validate_client_window_invariants(100, 100, 0, 100, 10.0, 10.0, tolerance=bad_tolerance)
+
+
 # ============================================================================
 # 4. Nearest-Rank Percentile & Tail Reporting Guardrail Tests
 # ============================================================================
@@ -264,6 +320,39 @@ def test_sample_status_for_4998_example() -> None:
     assert p999_status == "exploratory"
     assert example["p99_status"] == p99_status
     assert example["p999_status"] == p999_status
+
+
+def test_evaluate_tail_statuses_type_and_value_hardening() -> None:
+    """Verify evaluate_tail_statuses rejects booleans, floats, strings, and negative values."""
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        evaluate_tail_statuses(True)
+
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        evaluate_tail_statuses(False)
+
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        evaluate_tail_statuses(100.5)
+
+    with pytest.raises(TypeError, match="sample_count must be an integer"):
+        evaluate_tail_statuses("1000")
+
+    with pytest.raises(ValueError, match="sample_count cannot be negative"):
+        evaluate_tail_statuses(-1)
+
+
+def test_nearest_rank_percentile_rejects_booleans_and_invalid_values() -> None:
+    """Verify calculate_nearest_rank_percentile rejects booleans and non-finite values."""
+    with pytest.raises(ValueError, match="Percentile must be in"):
+        calculate_nearest_rank_percentile([10.0, 20.0], True)
+
+    with pytest.raises(ValueError, match="Percentile must be in"):
+        calculate_nearest_rank_percentile([10.0, 20.0], float("nan"))
+
+    with pytest.raises(ValueError, match="Latency values must be finite non-negative"):
+        calculate_nearest_rank_percentile([10.0, True], 0.99)
+
+    with pytest.raises(ValueError, match="Latency values must be finite non-negative"):
+        calculate_nearest_rank_percentile([10.0, -1.0], 0.99)
 
 
 # ============================================================================
@@ -406,6 +495,46 @@ def test_monotonic_freshness_boot_continuity() -> None:
     )
     assert is_stale is True
     assert reason == "future_monotonic_timestamp"
+
+
+@pytest.mark.parametrize("bad_max_age", [-1.0, -0.01, float("nan"), float("inf"), float("-inf"), True])
+def test_check_monotonic_freshness_rejects_invalid_max_report_age(bad_max_age) -> None:
+    """Verify check_monotonic_freshness raises ValueError for invalid max_report_age_s."""
+    with pytest.raises(ValueError, match="max_report_age_s must be a finite non-negative number"):
+        check_monotonic_freshness(
+            server_monotonic_now=100.0,
+            report_monotonic_s=90.0,
+            current_server_boot_id="boot-1",
+            report_server_boot_id="boot-1",
+            max_report_age_s=bad_max_age,
+        )
+
+
+def test_check_monotonic_freshness_safely_rejects_invalid_timestamps_and_boot_ids() -> None:
+    """Verify check_monotonic_freshness safely handles invalid timestamps and boot IDs without crashing."""
+    valid_boot = "boot-1234"
+
+    # Missing or blank or non-string current_server_boot_id
+    assert check_monotonic_freshness(100.0, 95.0, "", valid_boot) == (True, None, "missing_boot_identity")
+    assert check_monotonic_freshness(100.0, 95.0, "   ", valid_boot) == (True, None, "missing_boot_identity")
+    assert check_monotonic_freshness(100.0, 95.0, None, valid_boot) == (True, None, "missing_boot_identity")
+
+    # Missing or blank or non-string report_server_boot_id
+    assert check_monotonic_freshness(100.0, 95.0, valid_boot, "") == (True, None, "missing_boot_identity")
+    assert check_monotonic_freshness(100.0, 95.0, valid_boot, "   ") == (True, None, "missing_boot_identity")
+    assert check_monotonic_freshness(100.0, 95.0, valid_boot, None) == (True, None, "missing_boot_identity")
+
+    # Boolean timestamps
+    assert check_monotonic_freshness(True, 95.0, valid_boot, valid_boot) == (True, None, "invalid_monotonic_timestamp")
+    assert check_monotonic_freshness(100.0, False, valid_boot, valid_boot) == (True, None, "invalid_monotonic_timestamp")
+
+    # Negative timestamps
+    assert check_monotonic_freshness(-10.0, 95.0, valid_boot, valid_boot) == (True, None, "invalid_monotonic_timestamp")
+    assert check_monotonic_freshness(100.0, -5.0, valid_boot, valid_boot) == (True, None, "invalid_monotonic_timestamp")
+
+    # Non-finite timestamps
+    assert check_monotonic_freshness(float("nan"), 95.0, valid_boot, valid_boot) == (True, None, "non_finite_monotonic_timestamp")
+    assert check_monotonic_freshness(100.0, float("inf"), valid_boot, valid_boot) == (True, None, "non_finite_monotonic_timestamp")
 
 
 # ============================================================================
