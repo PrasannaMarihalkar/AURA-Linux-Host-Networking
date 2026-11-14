@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AURA action record v1.2",
+  "description": "Lifecycle record for mitigation actions. Status 'applied' is strictly prohibited in observe_only and dry_run modes.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "timestamp_epoch_s",
+    "server_boot_id",
+    "run_id",
+    "window_id",
+    "controller_mode",
+    "diagnosis",
+    "action"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.2"
+    },
+    "timestamp_epoch_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Timestamp when action lifecycle event was logged. Audit only."
+    },
+    "server_boot_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Server Linux boot identity UUID (/proc/sys/kernel/random/boot_id)."
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier of the experimental run."
+    },
+    "window_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Window sequence number triggering the evaluation."
+    },
+    "report_age_s": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Telemetry age computed from server monotonic clock at decision time."
+    },
+    "controller_mode": {
+      "type": "string",
+      "enum": [
+        "observe_only",
+        "dry_run",
+        "apply"
+      ],
+      "description": "Operating mode. 'applied' action status is strictly forbidden under observe_only or dry_run."
+    },
+    "diagnosis": {
+      "type": "object",
+      "required": [
+        "label",
+        "evidence",
+        "limitations"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "enum": [
+            "cpu_contention_candidate",
+            "rx_activity_skew_candidate",
+            "interrupt_pressure_candidate",
+            "uncertain",
+            "normal"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "action": {
+      "type": "object",
+      "required": [
+        "type",
+        "status",
+        "reason",
+        "before",
+        "requested",
+        "after",
+        "rollback_attempted",
+        "rollback_verified",
+        "error"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "no_op",
+            "cpu_weight",
+            "rps_manual_recommendation"
+          ],
+          "description": "Mitigation action type."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_attempted",
+            "dry_run",
+            "applied",
+            "failed",
+            "rolled_back"
+          ],
+          "description": "Execution status. Note: 'applied' requires live readback verification and apply mode."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable justification for the action or inhibition."
+        },
+        "before": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Baseline configuration read back prior to modification (e.g. {'aura-app.slice': 100})."
+        },
+        "requested": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Target configuration requested by policy (e.g. {'aura-app.slice': 200})."
+        },
+        "after": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "Verified system setting read back from kernel/systemd after execution."
+        },
+        "rollback_attempted": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True if an automated or scheduled restoration was initiated."
+        },
+        "rollback_verified": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True if readback confirmed settings matched exact 'before' values."
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Diagnostic details if execution, verification, or rollback encountered an error."
+        }
+      },
+      "additionalProperties": true
+    },
+    "p99_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "throughput_rps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "cpu_psi_some_avg10_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "controller_mode": { "enum": ["observe_only", "dry_run"] }
+        }
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "status": {
+                "not": { "const": "applied" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "properties": {
+              "status": { "const": "applied" }
+            },
+            "required": ["status"]
+          }
+        },
+        "required": ["action"]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "before": { "type": "object" },
+              "requested": { "type": "object" },
+              "after": { "type": "object" }
+            },
+            "required": ["before", "requested", "after"]
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

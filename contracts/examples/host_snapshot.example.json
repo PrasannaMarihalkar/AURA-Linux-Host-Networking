@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.2",
+  "snapshot_timestamp_epoch_s": 1794230000.14,
+  "snapshot_monotonic_s": 1420.54,
+  "host_boot_id": "b7a8d50f-e25c-4861-9c12-32b78912e541",
+  "interval_duration_s": 10.0,
+  "host_id": "aura-server-canonical",
+  "kernel_release": "6.8.0-45-generic",
+  "interface": "enp0s3",
+  "interface_driver": "e1000",
+  "rx_queue_count": 1,
+  "cpu_psi_some_avg10_pct": 2.45,
+  "cpu_psi_some_avg60_pct": 1.80,
+  "cpu_psi_some_avg300_pct": 1.20,
+  "cpu_psi_some_total_us": 1420500,
+  "net_rx_softirq_delta_per_cpu": [
+    {"cpu_id": 0, "delta": 4820, "reason": null},
+    {"cpu_id": 1, "delta": 115, "reason": null}
+  ],
+  "net_tx_softirq_delta_per_cpu": [
+    {"cpu_id": 0, "delta": 2400, "reason": null},
+    {"cpu_id": 1, "delta": 85, "reason": null}
+  ],
+  "softnet_processed_delta_per_cpu": [
+    {"cpu_id": 0, "delta": 4850, "reason": null},
+    {"cpu_id": 1, "delta": 120, "reason": null}
+  ],
+  "softnet_dropped_delta_per_cpu": [
+    {"cpu_id": 0, "delta": 0, "reason": null},
+    {"cpu_id": 1, "delta": 0, "reason": null}
+  ],
+  "softnet_time_squeeze_delta_per_cpu": [
+    {"cpu_id": 0, "delta": 0, "reason": null},
+    {"cpu_id": 1, "delta": 0, "reason": null}
+  ],
+  "interface_rx_bytes_delta": 4852000,
+  "interface_rx_packets_delta": 5010,
+  "interface_rx_dropped_delta": 0,
+  "network_irq_delta": 5025,
+  "network_irq_source": "19-enp0s3",
+  "rps_masks_by_rx_queue": {
+    "rx-0": "0"
+  },
+  "missing_fields": [],
+  "counter_scope_notes": {
+    "net_rx_softirq": "Host-wide per-CPU cumulative delta; not per-flow attributed.",
+    "cpu_psi": "Derived from /proc/pressure/cpu some 10s, 60s, 300s averages. System-level full PSI is undefined and omitted."
+  }
+}

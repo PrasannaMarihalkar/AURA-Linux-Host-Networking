@@ -1,0 +1,3 @@
+# AURA Core Runtime Dependencies
+# Used by the HTTP server and controller to validate data interchange contracts (Draft 2020-12).
+jsonschema>=4.20.0

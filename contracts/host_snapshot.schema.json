@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AURA host telemetry snapshot v1.2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "snapshot_timestamp_epoch_s",
+    "snapshot_monotonic_s",
+    "host_boot_id",
+    "interval_duration_s",
+    "host_id",
+    "kernel_release",
+    "interface",
+    "missing_fields"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.2"
+    },
+    "snapshot_timestamp_epoch_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Host wall-clock epoch timestamp at snapshot capture. Audit only."
+    },
+    "snapshot_monotonic_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Host monotonic timestamp (time.monotonic()) at snapshot capture. Used for local interval duration and freshness."
+    },
+    "host_boot_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Host Linux boot identity UUID (/proc/sys/kernel/random/boot_id). Guarantees monotonic continuity."
+    },
+    "interval_duration_s": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Elapsed duration in seconds between the baseline sample and current sample."
+    },
+    "host_id": {
+      "type": "string",
+      "description": "Identifier or hostname of the host emitting telemetry."
+    },
+    "kernel_release": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Linux kernel release string (uname -r)."
+    },
+    "interface": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Network interface monitored (e.g. eth0, enp0s3)."
+    },
+    "interface_driver": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Kernel network driver name."
+    },
+    "rx_queue_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Number of hardware/virtual RX queues exposed in sysfs."
+    },
+    "cpu_psi_some_avg10_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100,
+      "description": "CPU PSI 'some' 10-second average stall percentage. Note: CPU 'full' is undefined at system level and excluded."
+    },
+    "cpu_psi_some_avg60_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100,
+      "description": "CPU PSI 'some' 60-second average stall percentage."
+    },
+    "cpu_psi_some_avg300_pct": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 100,
+      "description": "CPU PSI 'some' 300-second average stall percentage."
+    },
+    "cpu_psi_some_total_us": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Cumulative CPU PSI 'some' total stall time in microseconds since boot."
+    },
+    "net_rx_softirq_delta_per_cpu": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": ["cpu_id", "delta", "reason"],
+        "properties": {
+          "cpu_id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
+      },
+      "description": "Incremental NET_RX softIRQ events per CPU during the interval (host-wide, not per-flow attributed)."
+    },
+    "net_tx_softirq_delta_per_cpu": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": ["cpu_id", "delta", "reason"],
+        "properties": {
+          "cpu_id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
+      },
+      "description": "Incremental NET_TX softIRQ events per CPU during the interval (host-wide, not per-flow attributed)."
+    },
+    "softnet_processed_delta_per_cpu": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": ["cpu_id", "delta", "reason"],
+        "properties": {
+          "cpu_id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
+      },
+      "description": "Incremental packets processed by softnet backlog per CPU."
+    },
+    "softnet_dropped_delta_per_cpu": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": ["cpu_id", "delta", "reason"],
+        "properties": {
+          "cpu_id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
+      },
+      "description": "Incremental frames dropped by softnet backlog (overflow of netdev_max_backlog)."
+    },
+    "softnet_time_squeeze_delta_per_cpu": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "required": ["cpu_id", "delta", "reason"],
+        "properties": {
+          "cpu_id": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "delta": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reason": {
+                "type": "null"
+              }
+            },
+            "required": ["delta", "reason"]
+          },
+          {
+            "properties": {
+              "delta": {
+                "type": "null"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": ["delta", "reason"]
+          }
+        ]
+      },
+      "description": "Incremental NAPI budget exhaustion events (time-squeeze) per CPU."
+    },
+    "interface_rx_bytes_delta": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Incremental received bytes on the interface."
+    },
+    "interface_rx_packets_delta": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Incremental received packets on the interface."
+    },
+    "interface_rx_dropped_delta": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Incremental driver/hardware packet drops on the interface."
+    },
+    "network_irq_delta": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Incremental hardware interrupts attributable to the network device."
+    },
+    "network_irq_source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Attributed IRQ line or driver label from /proc/interrupts."
+    },
+    "rps_masks_by_rx_queue": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Current sysfs RPS CPU affinity masks keyed by queue name (e.g. rx-0)."
+    },
+    "missing_fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["metric", "reason"],
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Structured audit list of metrics that were unavailable, reset, or uncalculable with machine-readable reasons."
+    },
+    "counter_scope_notes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Architectural scope attribution notes clarifying metric domain and non-causality boundaries."
+    }
+  },
+  "additionalProperties": true
+}

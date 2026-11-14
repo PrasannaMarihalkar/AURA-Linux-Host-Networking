@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.2",
+  "timestamp_epoch_s": 1794230000.25,
+  "server_boot_id": "b7a8d50f-e25c-4861-9c12-32b78912e541",
+  "run_id": "exp-contention-002",
+  "window_id": 3,
+  "report_age_s": 0.12,
+  "stale_telemetry": false,
+  "conflicting_evidence": false,
+  "controller_mode": "observe_only",
+  "diagnosis": {
+    "label": "cpu_contention_candidate",
+    "confidence": 0.85,
+    "evidence": [
+      "Client P99 latency (24.5ms) exceeded threshold (15.0ms) across 3 consecutive windows",
+      "CPU PSI some avg10 elevated at 18.4% above baseline (2.5%)"
+    ],
+    "limitations": [
+      "VirtualBox hypervisor scheduling jitter may contribute to PSI pressure",
+      "Observe-only mode; causality is hypothetical until active control test"
+    ]
+  },
+  "action": {
+    "type": "no_op",
+    "status": "dry_run",
+    "reason": "CPU contention candidate detected, but controller is configured in observe_only mode",
+    "before": {
+      "aura-app.slice": 100,
+      "aura-bg.slice": 100
+    },
+    "requested": {
+      "aura-app.slice": 200
+    },
+    "after": {
+      "aura-app.slice": 100,
+      "aura-bg.slice": 100
+    },
+    "rollback_attempted": null,
+    "rollback_verified": null,
+    "error": null
+  },
+  "p99_ms": 24.5,
+  "throughput_rps": 412.3,
+  "cpu_psi_some_avg10_pct": 18.4
+}
