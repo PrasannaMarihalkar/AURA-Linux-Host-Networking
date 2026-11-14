@@ -19,35 +19,38 @@ Under a controlled Linux TCP service workload, can a lightweight host controller
 ```text
 [Akash: Remote Client (aura/client.py)]
         |
-        v HTTP /work
+        | HTTP requests (GET /work?n=<iters>)
+        v
 [AURA HTTP Server (aura/server.py)]  <---+
-        |                                 | Telemetry Snapshots
+        |                                 | Host Telemetry Snapshots
    (Port 8080)                            |
         |                           [Shridhar: Host Telemetry (aura/telemetry.py)]
         v
-  POST /report (Ingress Schema)
+  POST /report (4-Stage Validated Ingestion Pipeline)
         |
-        v Enriched Ingestion Record
+        v Enriched JSONL Measurement Storage (server_received_at_*, server_boot_id)
 [Prasanna: Controller / Diagnosis (aura/controller.py)]  ---> controller_event.jsonl
         |
-        v Safe Wrappers (Future Gates)
+        v Safe Wrappers (Future Phase 5 / Gate C)
 [Shravan: Resource Controls (aura/controls/)]
 ```
 
-### Current Status: Gate A — Shared Contracts and Semantic Freeze
-* **Gate A (Implemented in this branch):**
+### Current Status: Gate B — Baseline HTTP Server and Observe-Only Controller
+* **Gate A (Completed & Merged into `main`):**
   * Repository foundation, branching policies, and pull request conventions.
   * Shared JSON Schema Draft 2020-12 interchange contracts (`contracts/*.schema.json`).
   * Two-stage client window ingestion specification (`client_window` ingress vs. `client_window_ingested`).
   * Normative rules for physical units, invariants, nearest-rank percentiles, tail reporting guardrails, and counter deltas (`contracts/CONTRACT_RULES.md`).
   * Conforming test fixtures and negative validation cases (`contracts/examples/`).
-  * Contract and semantic test suite (`tests/test_contracts.py`) using `pytest` and `jsonschema`.
-  * Continuous Integration workflow (`.github/workflows/ci.yml`).
-* **Gate B (Planned next step — not implemented in Gate A):**
-  * Baseline HTTP workload server (`aura/server.py` with `/health`, deterministic `/work`, and `/report`).
-  * Rule-based heuristic diagnosis module (`aura/diagnosis.py`).
-  * Observe-only / dry-run controller daemon (`aura/controller.py`).
-  * Server-side monotonic timestamp stamping, boot ID continuity checks, and report persistence.
+  * Contract and semantic test suite (`tests/test_contracts.py`).
+  * Continuous Integration matrix workflow (`.github/workflows/ci.yml`).
+* **Gate B (Implemented in this branch):**
+  * Baseline HTTP workload server (`aura/server.py` with `/health`, deterministic `/work?n=<iters>`, and 4-stage validated `/report`).
+  * Rule-based heuristic diagnosis engine (`aura/diagnosis.py`) covering CPU contention, receive activity skew, softnet congestion, and conflicting evidence.
+  * Observe-only / dry-run controller daemon (`aura/controller.py`) with periodic evaluation loop, monotonic freshness checking, boot identity continuity, and schema-valid `controller_event.jsonl` emission.
+  * Server-side monotonic timestamp stamping (`time.monotonic()`), Linux boot identity continuity (`/proc/sys/kernel/random/boot_id`), and thread-safe JSONL persistence.
+  * Calibrated configuration and runtime thresholds (`config/thresholds.json`).
+  * Comprehensive integration test suites (`tests/test_server.py`, `tests/test_controller.py`).
 
 ---
 
@@ -55,7 +58,7 @@ Under a controlled Linux TCP service workload, can a lightweight host controller
 
 | Team Member | GitHub Username | Role | Assigned Files / Responsibilities | Assigned Branch |
 |---|---|---|---|---|
-| **Prasanna Marihalkar** | `@PrasannaMarihalkar` | Project Lead & Controller Owner | Contracts (`contracts/`), `aura/server.py` [Gate B], `aura/controller.py` [Gate B], `aura/diagnosis.py` [Gate B] | `feat/prasanna-foundation` |
+| **Prasanna Marihalkar** | `@PrasannaMarihalkar` | Project Lead & Controller Owner | Contracts (`contracts/`), `aura/server.py`, `aura/controller.py`, `aura/diagnosis.py` | `feat/prasanna-gate-b` |
 | **Akash Bagoji** | `@akashsb2005` | Workload & Benchmark Owner | Client runner (`aura/client.py`), benchmarks (`experiments/`), analysis (`analysis/`) | `feat/akash-benchmark` |
 | **Shridhar** | `@SHRI427161` | Telemetry Collector Owner | Host telemetry collector (`aura/telemetry.py`), tests (`tests/test_telemetry.py`) | `feat/shridhar-telemetry` |
 | **Shravan Kumar Patil** | `@shravanakumarpatil-123` | Resource Controls Owner | Linux resource controls (`aura/controls/`), safety scripts (`scripts/`) | `feat/shravan-controls` |
@@ -70,14 +73,15 @@ AURA-Linux-Host-Networking/
 │   ├── pull_request_template.md             # Standard PR template
 │   ├── ISSUE_TEMPLATE/                      # Bug, feature, and paper review templates
 │   └── workflows/
-│       └── ci.yml                           # GitHub Actions CI matrix workflow
+│       └── ci.yml                           # GitHub Actions CI matrix workflow (Python 3.10–3.13)
 ├── aura/
 │   ├── __init__.py                          # Package initialization
-│   ├── server.py                            # [Planned - Gate B] Workload HTTP server (/health, /work, /report)
-│   ├── controller.py                        # [Planned - Gate B] Observe-only / dry-run controller loop
-│   └── diagnosis.py                         # [Planned - Gate B] Candidate diagnosis engine
+│   ├── contracts.py                         # Pure contract validation and invariant helpers
+│   ├── server.py                            # Baseline workload HTTP server (/health, /work, /report)
+│   ├── controller.py                        # Observe-only controller daemon & periodic evaluation loop
+│   └── diagnosis.py                         # Rule-based candidate root-cause diagnosis engine
 ├── config/
-│   └── thresholds.json                      # Default threshold configuration parameters
+│   └── thresholds.json                      # Baseline threshold and timing configuration parameters
 ├── contracts/
 │   ├── client_window.schema.json            # Ingress measurement window schema (client -> server)
 │   ├── client_window_ingested.schema.json   # Server-enriched window schema (server -> controller)
@@ -93,13 +97,16 @@ AURA-Linux-Host-Networking/
 │       └── action_record.example.json
 ├── docs/                                    # Architectural and research documentation
 │   ├── architecture/
+│   │   └── gate_b_design.md                 # Gate B design and implementation specification
 │   ├── research/
 │   └── decisions/
 ├── experiments/                             # Workload and benchmarking automation scripts
 ├── analysis/                                # Aggregation and plotting scripts
 ├── tests/
 │   ├── __init__.py
-│   └── test_contracts.py                   # Pytest suite for contract schemas and semantic rules
+│   ├── test_contracts.py                   # Pytest suite for contract schemas and semantic rules (64 tests)
+│   ├── test_server.py                      # Pytest suite for HTTP server endpoints and ingestion (23 tests)
+│   └── test_controller.py                  # Pytest suite for diagnosis engine & controller loop (13 tests)
 ├── requirements.txt                         # Runtime dependencies (jsonschema)
 ├── requirements-dev.txt                     # Development and testing dependencies (pytest)
 ├── CONTRIBUTING.md                          # Contribution guidelines and merge gates
@@ -119,17 +126,46 @@ pip install -r requirements-dev.txt
 # 2. Syntax compilation check across modules
 python3 -m compileall -q aura analysis tests
 
-# 3. Run contract and semantic test suite using pytest
+# 3. Run complete test suite using pytest (100 tests)
 python3 -m pytest -v tests/
 
-# 4. Validate all contract schemas and examples individually
-for f in contracts/*.schema.json contracts/examples/*.json; do
+# 4. Validate all contract schemas, fixtures, and configuration files
+for f in contracts/*.schema.json contracts/examples/*.json config/*.json; do
     python3 -m json.tool "$f" > /dev/null
 done
+
+# 5. Start the AURA HTTP server
+python3 -m aura.server
+
+# 6. Start the observe-only controller
+python3 -m aura.controller
 ```
 
 ---
 
-## 6. Contribution Rules
+## 6. HTTP Server Endpoints
+
+The baseline HTTP server runs on port 8080 by default (`AURA_PORT` and `AURA_HOST` configurable via environment variables):
+
+* **`GET /health`**: Fast liveness probe returning HTTP 200 `{"status": "ok"}`.
+* **`GET /work?n=<iters>`**: Deterministic CPU-bound computation workload using iterated SHA-256 rounds. Returns iteration count, execution time, and cryptographic checksum. Rejects non-integers, negative counts, and requests exceeding `max_work_iters`.
+* **`POST /report`**: 4-stage validated benchmark window ingestion:
+  1. **Stage 1 (Ingress Schema):** Validates raw payload against `contracts/client_window.schema.json`. Rejects malformed JSON, NaN/Infinity, and client-injected server timestamps.
+  2. **Stage 2 (Semantic & Invariant Validation):** Pure arithmetic verification via `aura.contracts:validate_client_window_invariants` (`requests == successes + errors`, `sample_count <= successes`, strictly positive duration, throughput consistency, strict integer types).
+  3. **Stage 3 (Server Enrichment):** Stamped with server receipt timestamps (`server_received_at_epoch_s`, `server_received_at_monotonic_s`) and host Linux boot identity (`server_boot_id`).
+  4. **Stage 4 (Enriched Schema):** Validates enriched payload against `contracts/client_window_ingested.schema.json` before atomic append to `results/raw/client_window_ingested.jsonl`.
+
+---
+
+## 7. Observe-Only Controller Safety Guarantees
+
+In accordance with Gate B specifications, the controller operates in strict **`observe_only`** mode:
+* **No Active Mitigations:** System settings (`cgroups`, `CPUWeight`, `RPS`, `IRQ` affinities) are never modified.
+* **Guaranteed Action Status:** Emitted action status is strictly `not_attempted` or `dry_run`. Emitting `status = applied` is strictly prohibited by schema and contract invariants.
+* **Conservative Fallback:** If telemetry is stale, boot IDs mismatch, timestamps are invalid, or evidence is conflicting, the controller conservatively outputs candidate diagnosis `uncertain` and action `no_op`.
+
+---
+
+## 8. Contribution Rules
 
 Direct pushes to `main` are disabled. All contributions must follow the [AURA Development Workflow](CONTRIBUTING.md) and pass local compile, test, and schema verification gates before opening a Pull Request.
