@@ -145,17 +145,93 @@ def evaluate_candidate_diagnosis(
     p99_status = client_window.get("p99_status", "insufficient")
     sample_count = client_window.get("sample_count", 0)
 
-    # Note on sample sufficiency
+    # 4. Enforce P99 sample sufficiency safeguard
+    # When p99_status == "insufficient", diagnosis must be "uncertain", with no candidate
+    # root-cause classification and a no_op action. Do not allow elevated CPU PSI, RX skew,
+    # softnet drops, or time-squeeze counts to bypass the insufficient-tail safeguard.
     if p99_status == "insufficient":
-        limitations.append(f"P99 latency sample count ({sample_count}) is insufficient for statistical confidence.")
-    elif p99_status == "exploratory":
-        limitations.append(f"P99 latency sample count ({sample_count}) meets exploratory criteria (<10,000 samples).")
+        limitations.append(
+            f"P99 latency sample count ({sample_count}) is insufficient for statistical confidence; "
+            "root-cause candidate classification inhibited."
+        )
+        evidence.append("P99 latency sample count is insufficient; evaluating diagnosis as uncertain.")
+        return {
+            "label": "uncertain",
+            "confidence": None,
+            "evidence": evidence,
+            "limitations": limitations,
+            "conflicting_evidence": False,
+        }
 
-    # Host metrics
+    # For exploratory P99 evidence, document guardrail and do not assign misleading high confidence
+    if p99_status == "exploratory":
+        limitations.append(
+            f"P99 latency sample count ({sample_count}) meets exploratory criteria (<10,000 samples); "
+            "tail confidence is attenuated."
+        )
+
+    # Always include baseline scope attribution limitation
+    limitations.append(
+        "Host-wide /proc/softirqs NET_RX is not per-flow attributed; reflects aggregate host receive processing."
+    )
+
+    # 5. Extract host metrics
     cpu_psi_avg10 = host_snapshot.get("cpu_psi_some_avg10_pct")
     net_rx_deltas = host_snapshot.get("net_rx_softirq_delta_per_cpu")
     softnet_dropped = host_snapshot.get("softnet_dropped_delta_per_cpu")
     softnet_squeeze = host_snapshot.get("softnet_time_squeeze_delta_per_cpu")
+    missing_fields = host_snapshot.get("missing_fields") or []
+
+    # Check for structured missing fields or null essential telemetry
+    # Telemetry is incomplete if essential signals are null or explicitly recorded in missing_fields
+    has_missing_essential_telemetry = False
+    missing_reasons: list[str] = []
+
+    if missing_fields:
+        for mf in missing_fields:
+            if isinstance(mf, dict):
+                metric_name = mf.get("metric", "unknown")
+                reason_code = mf.get("reason", "unspecified")
+                missing_reasons.append(f"{metric_name} ({reason_code})")
+        if missing_reasons:
+            has_missing_essential_telemetry = True
+            evidence.append(f"Host telemetry reports missing/reset fields: {', '.join(missing_reasons)}.")
+
+    # Check per-CPU deltas for null/reset reasons when present
+    if net_rx_deltas is None and "net_rx_softirq_delta_per_cpu" in host_snapshot:
+        has_missing_essential_telemetry = True
+        missing_reasons.append("net_rx_softirq_delta_per_cpu (is_null)")
+    elif isinstance(net_rx_deltas, list):
+        for item in net_rx_deltas:
+            if isinstance(item, dict) and item.get("delta") is None:
+                has_missing_essential_telemetry = True
+                reason = item.get("reason") or "null_delta"
+                cpu_id = item.get("cpu_id", "?")
+                missing_reasons.append(f"net_rx_softirq_delta_per_cpu[cpu_{cpu_id}] ({reason})")
+
+    for delta_list, name in (
+        (softnet_dropped, "softnet_dropped_delta_per_cpu"),
+        (softnet_squeeze, "softnet_time_squeeze_delta_per_cpu"),
+    ):
+        if delta_list is None and name in host_snapshot:
+            has_missing_essential_telemetry = True
+            missing_reasons.append(f"{name} (is_null)")
+        elif isinstance(delta_list, list):
+            for item in delta_list:
+                if isinstance(item, dict) and item.get("delta") is None:
+                    has_missing_essential_telemetry = True
+                    reason = item.get("reason") or "null_delta"
+                    cpu_id = item.get("cpu_id", "?")
+                    missing_reasons.append(f"{name}[cpu_{cpu_id}] ({reason})")
+
+    if cpu_psi_avg10 is None and "cpu_psi_some_avg10_pct" in host_snapshot:
+        has_missing_essential_telemetry = True
+        missing_reasons.append("cpu_psi_some_avg10_pct (is_null)")
+
+    if missing_reasons and not evidence:
+        evidence.append(f"Host telemetry contains missing or partial signals: {', '.join(missing_reasons)}.")
+    elif missing_reasons and not any("missing" in e for e in evidence):
+        evidence.append(f"Host telemetry contains missing or partial signals: {', '.join(missing_reasons)}.")
 
     # Evaluate latency degradation signal
     latency_degraded = False
@@ -165,6 +241,15 @@ def evaluate_candidate_diagnosis(
             evidence.append(f"Client P99 latency ({p99_ms:.2f}ms) exceeded target ({p99_target_ms:.2f}ms).")
         else:
             evidence.append(f"Client P99 latency ({p99_ms:.2f}ms) within target ({p99_target_ms:.2f}ms).")
+    else:
+        # If latency metric is missing, we cannot assess degradation
+        return {
+            "label": "uncertain",
+            "confidence": None,
+            "evidence": ["Client P99 latency metric is missing; cannot evaluate degradation."],
+            "limitations": limitations,
+            "conflicting_evidence": False,
+        }
 
     # Evaluate CPU PSI signal
     cpu_psi_elevated = False
@@ -200,22 +285,22 @@ def evaluate_candidate_diagnosis(
                 f"NET_RX softIRQ skew detected: CPU {busiest_cpu} handled {skew_ratio * 100:.1f}% "
                 f"of {total_rx_events} events (threshold {skew_thresh * 100:.1f}%)."
             )
-            limitations.append(
-                "Host-wide /proc/softirqs NET_RX is not per-flow attributed; reflects aggregate host receive processing."
-            )
 
+    has_softnet_pressure = False
     if softnet_drops_total >= min_dropped_thresh:
+        has_softnet_pressure = True
         evidence.append(f"Softnet backlog frame drops detected ({softnet_drops_total} drops).")
     if softnet_squeeze_total >= min_squeeze_thresh:
+        has_softnet_pressure = True
         evidence.append(f"NAPI budget time-squeeze events detected ({softnet_squeeze_total} squeezes).")
 
-    # 4. Check for conflicting evidence
+    # 6. Check for conflicting evidence
     # Example: CPU PSI is high, but latency is normal; or latency is degraded but all host metrics are completely nominal.
     if cpu_psi_elevated and (p99_target_ms is not None and not latency_degraded):
         conflicting_evidence = True
         evidence.append("Conflicting evidence: CPU PSI is elevated while client P99 latency remains within target.")
 
-    # 5. Determine Candidate Hypothesis
+    # 7. Determine Candidate Hypothesis
     if conflicting_evidence:
         return {
             "label": "uncertain",
@@ -227,7 +312,7 @@ def evaluate_candidate_diagnosis(
 
     # Strong CPU contention: Latency elevated + CPU PSI elevated
     if cpu_psi_elevated and latency_degraded:
-        confidence = 0.85 if p99_status == "minimum_tail_count_met" else (0.65 if p99_status == "exploratory" else 0.40)
+        confidence = 0.85 if p99_status == "minimum_tail_count_met" else 0.50
         return {
             "label": "cpu_contention_candidate",
             "confidence": confidence,
@@ -236,9 +321,9 @@ def evaluate_candidate_diagnosis(
             "conflicting_evidence": False,
         }
 
-    # Softnet drop/squeeze or high RX skew
+    # Softnet drop or high RX skew
     if rx_skew_detected or (softnet_drops_total >= min_dropped_thresh and latency_degraded):
-        confidence = 0.80 if p99_status == "minimum_tail_count_met" else 0.60
+        confidence = 0.80 if p99_status == "minimum_tail_count_met" else 0.50
         return {
             "label": "rx_activity_skew_candidate",
             "confidence": confidence,
@@ -248,7 +333,7 @@ def evaluate_candidate_diagnosis(
         }
 
     if softnet_squeeze_total >= min_squeeze_thresh and latency_degraded:
-        confidence = 0.75 if p99_status == "minimum_tail_count_met" else 0.55
+        confidence = 0.75 if p99_status == "minimum_tail_count_met" else 0.45
         return {
             "label": "interrupt_pressure_candidate",
             "confidence": confidence,
@@ -257,9 +342,38 @@ def evaluate_candidate_diagnosis(
             "conflicting_evidence": False,
         }
 
-    # Normal: When thresholds are calibrated and evidence shows healthy latency and healthy host
-    if p99_target_ms is not None and not latency_degraded and not cpu_psi_elevated and not rx_skew_detected:
-        confidence = 0.90 if p99_status != "insufficient" else 0.60
+    # If latency is degraded but no host signals explain it (e.g., network path delay, client bottleneck)
+    if latency_degraded:
+        evidence.append("Tail latency elevated without corroborating host CPU PSI or softnet congestion signals.")
+        return {
+            "label": "uncertain",
+            "confidence": None,
+            "evidence": evidence,
+            "limitations": limitations,
+            "conflicting_evidence": False,
+        }
+
+    # If any essential telemetry is missing or partial, we MUST NOT declare 'normal'
+    if has_missing_essential_telemetry:
+        evidence.append("Required telemetry signals are unavailable, reset, or partial; cannot confirm normal state.")
+        return {
+            "label": "uncertain",
+            "confidence": None,
+            "evidence": evidence,
+            "limitations": limitations,
+            "conflicting_evidence": False,
+        }
+
+    # Normal: When thresholds are calibrated, no essential telemetry is missing,
+    # and evidence shows healthy latency AND no host pressure (no PSI elevation, no RX skew, no softnet drops, no softnet squeeze).
+    if (
+        p99_target_ms is not None
+        and not latency_degraded
+        and not cpu_psi_elevated
+        and not rx_skew_detected
+        and not has_softnet_pressure
+    ):
+        confidence = 0.90 if p99_status == "minimum_tail_count_met" else 0.60
         return {
             "label": "normal",
             "confidence": confidence,

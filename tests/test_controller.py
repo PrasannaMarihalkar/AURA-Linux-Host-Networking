@@ -230,6 +230,8 @@ def test_controller_observe_only_cycle(tmp_path: Path):
     client_win["server_received_at_monotonic_s"] = 499.5
 
     host_snap = load_example("host_snapshot.example.json")
+    host_snap["host_boot_id"] = fake_boot_id
+    host_snap["snapshot_monotonic_s"] = 499.5
 
     controller.update_client_window(client_win)
     controller.update_host_snapshot(host_snap)
@@ -276,6 +278,8 @@ def test_controller_stale_telemetry_handling(tmp_path: Path):
     client_win["server_received_at_monotonic_s"] = 500.0  # Age = 100s > max_age (15s)
 
     host_snap = load_example("host_snapshot.example.json")
+    host_snap["host_boot_id"] = fake_boot_id
+    host_snap["snapshot_monotonic_s"] = 499.5
 
     controller.update_client_window(client_win)
     controller.update_host_snapshot(host_snap)
@@ -424,6 +428,8 @@ def test_end_to_end_server_to_controller_pipeline(tmp_path: Path):
 
         # Step 3: Feed enriched report & host snapshot into controller
         host_snap = load_example("host_snapshot.example.json")
+        host_snap["host_boot_id"] = common_boot_id
+        host_snap["snapshot_monotonic_s"] = 1200.0
         controller.update_client_window(enriched_report)
         controller.update_host_snapshot(host_snap)
 
@@ -441,3 +447,238 @@ def test_end_to_end_server_to_controller_pipeline(tmp_path: Path):
 
     finally:
         server.shutdown()
+
+
+# ============================================================================
+# 3. Targeted Correctness Hardening Regression Tests
+# ============================================================================
+
+def test_diagnosis_insufficient_p99_inhibits_all_candidate_classifications():
+    """Requirement 1: When p99_status == 'insufficient', diagnosis MUST be uncertain with no_op,
+    even under extreme elevated CPU PSI, RX skew, softnet drops, and time-squeeze events.
+    """
+    thresholds = load_thresholds()
+    thresholds["p99_target_ms"] = 15.0
+    thresholds["cpu_psi_some_avg10_threshold_pct"] = 10.0
+    thresholds["rx_activity_skew_candidate_threshold"] = 0.75
+
+    # Case A: Elevated CPU PSI but insufficient P99 samples
+    client_win_cpu = {
+        "p99_ms": 45.0,
+        "p99_status": "insufficient",
+        "sample_count": 80,  # < 100
+    }
+    host_snap_cpu = {
+        "cpu_psi_some_avg10_pct": 55.0,
+        "net_rx_softirq_delta_per_cpu": [{"cpu_id": 0, "delta": 100, "reason": None}],
+    }
+    diag_cpu = evaluate_candidate_diagnosis(client_win_cpu, host_snap_cpu, thresholds)
+    assert diag_cpu["label"] == "uncertain"
+    assert diag_cpu["confidence"] is None
+    assert any("insufficient" in e for e in diag_cpu["evidence"])
+
+    # Case B: Severe RX skew (99% on CPU 0) but insufficient P99 samples
+    client_win_rx = {
+        "p99_ms": 35.0,
+        "p99_status": "insufficient",
+        "sample_count": 50,
+    }
+    host_snap_rx = {
+        "cpu_psi_some_avg10_pct": 1.0,
+        "net_rx_softirq_delta_per_cpu": [
+            {"cpu_id": 0, "delta": 990, "reason": None},
+            {"cpu_id": 1, "delta": 10, "reason": None},
+        ],
+    }
+    diag_rx = evaluate_candidate_diagnosis(client_win_rx, host_snap_rx, thresholds)
+    assert diag_rx["label"] == "uncertain"
+    assert diag_rx["confidence"] is None
+
+    # Case C: Softnet drops & time-squeeze but insufficient P99 samples
+    client_win_softnet = {
+        "p99_ms": 40.0,
+        "p99_status": "insufficient",
+        "sample_count": 99,
+    }
+    host_snap_softnet = {
+        "cpu_psi_some_avg10_pct": 1.0,
+        "softnet_dropped_delta_per_cpu": [{"cpu_id": 0, "delta": 500, "reason": None}],
+        "softnet_time_squeeze_delta_per_cpu": [{"cpu_id": 0, "delta": 300, "reason": None}],
+    }
+    diag_softnet = evaluate_candidate_diagnosis(client_win_softnet, host_snap_softnet, thresholds)
+    assert diag_softnet["label"] == "uncertain"
+    assert diag_softnet["confidence"] is None
+
+
+def test_diagnosis_exploratory_p99_confidence_attenuated():
+    """Requirement 1: Exploratory P99 status (100 <= N < 10,000) does not assign high confidence."""
+    thresholds = load_thresholds()
+    thresholds["p99_target_ms"] = 15.0
+    thresholds["cpu_psi_some_avg10_threshold_pct"] = 10.0
+
+    client_win = {
+        "p99_ms": 30.0,
+        "p99_status": "exploratory",
+        "sample_count": 5000,
+    }
+    host_snap = {
+        "cpu_psi_some_avg10_pct": 35.0,
+        "net_rx_softirq_delta_per_cpu": [{"cpu_id": 0, "delta": 100, "reason": None}],
+    }
+    diag = evaluate_candidate_diagnosis(client_win, host_snap, thresholds)
+    assert diag["label"] == "cpu_contention_candidate"
+    assert diag["confidence"] == 0.50  # Attenuated from 0.85
+    assert any("exploratory criteria" in lim for lim in diag["limitations"])
+
+
+def test_controller_host_snapshot_freshness_and_boot_identity(tmp_path: Path):
+    """Requirement 2: Validate host snapshot freshness and boot identity.
+    A stale host snapshot, boot mismatch, or future timestamp must result in uncertain and no_op.
+    """
+    event_log = tmp_path / "controller_event.jsonl"
+    server_boot = "server-boot-uuid-111"
+    now_mono = 1000.0
+
+    controller = AuraController(
+        contracts_dir=CONTRACTS_DIR,
+        thresholds_path=THRESHOLDS_PATH,
+        event_log_path=event_log,
+        server_boot_id=server_boot,
+        monotonic_provider=lambda: now_mono,
+        epoch_provider=lambda: 1794230000.0,
+    )
+
+    client_win = load_example("client_window_ingested.example.json")
+    client_win["server_boot_id"] = server_boot
+    client_win["server_received_at_monotonic_s"] = now_mono - 1.0  # Fresh (1s old)
+
+    # Subtest A: Host snapshot stale (> max_host_snapshot_age_seconds = 15s)
+    host_snap_stale = load_example("host_snapshot.example.json")
+    host_snap_stale["host_boot_id"] = server_boot
+    host_snap_stale["snapshot_monotonic_s"] = now_mono - 25.0  # 25s old > 15s limit
+    controller.update_client_window(client_win)
+    controller.update_host_snapshot(host_snap_stale)
+    event_stale = controller.evaluate_cycle()
+    assert event_stale["stale_telemetry"] is True
+    assert event_stale["diagnosis"]["label"] == "uncertain"
+    assert event_stale["action"]["type"] == "no_op"
+
+    # Subtest B: Host boot ID mismatch
+    host_snap_boot_mismatch = load_example("host_snapshot.example.json")
+    host_snap_boot_mismatch["host_boot_id"] = "different-host-boot-222"
+    host_snap_boot_mismatch["snapshot_monotonic_s"] = now_mono - 1.0
+    controller.update_host_snapshot(host_snap_boot_mismatch)
+    event_boot_err = controller.evaluate_cycle()
+    assert event_boot_err["stale_telemetry"] is True
+    assert event_boot_err["diagnosis"]["label"] == "uncertain"
+    assert any("boot identity mismatch" in e for e in event_boot_err["diagnosis"]["evidence"])
+
+    # Subtest C: Host snapshot has future monotonic timestamp
+    host_snap_future = load_example("host_snapshot.example.json")
+    host_snap_future["host_boot_id"] = server_boot
+    host_snap_future["snapshot_monotonic_s"] = now_mono + 50.0  # 50s in future
+    controller.update_host_snapshot(host_snap_future)
+    event_future = controller.evaluate_cycle()
+    assert event_future["stale_telemetry"] is True
+    assert event_future["diagnosis"]["label"] == "uncertain"
+
+
+def test_diagnosis_missing_and_partial_telemetry_handling():
+    """Requirement 3: Never report normal when required signals are null, partial, reset,
+    or contain softnet drops/squeeze. Do not interpret missing metrics as zero.
+    """
+    thresholds = load_thresholds()
+    thresholds["p99_target_ms"] = 15.0
+
+    healthy_client_win = {
+        "p99_ms": 5.0,
+        "p99_status": "minimum_tail_count_met",
+        "sample_count": 12000,
+    }
+
+    # Case A: All-null CPU PSI
+    host_snap_null_psi = {
+        "cpu_psi_some_avg10_pct": None,
+        "net_rx_softirq_delta_per_cpu": [{"cpu_id": 0, "delta": 50, "reason": None}],
+        "softnet_dropped_delta_per_cpu": [{"cpu_id": 0, "delta": 0, "reason": None}],
+        "softnet_time_squeeze_delta_per_cpu": [{"cpu_id": 0, "delta": 0, "reason": None}],
+    }
+    diag_null_psi = evaluate_candidate_diagnosis(healthy_client_win, host_snap_null_psi, thresholds)
+    assert diag_null_psi["label"] == "uncertain"
+    assert any("cpu_psi_some_avg10_pct" in e for e in diag_null_psi["evidence"])
+
+    # Case B: Partial per-CPU counter deltas with reset reason
+    host_snap_reset = {
+        "cpu_psi_some_avg10_pct": 1.0,
+        "net_rx_softirq_delta_per_cpu": [
+            {"cpu_id": 0, "delta": 100, "reason": None},
+            {"cpu_id": 1, "delta": None, "reason": "counter_reset_detected"},
+        ],
+        "softnet_dropped_delta_per_cpu": [{"cpu_id": 0, "delta": 0, "reason": None}],
+        "softnet_time_squeeze_delta_per_cpu": [{"cpu_id": 0, "delta": 0, "reason": None}],
+    }
+    diag_reset = evaluate_candidate_diagnosis(healthy_client_win, host_snap_reset, thresholds)
+    assert diag_reset["label"] == "uncertain"
+    assert any("counter_reset_detected" in e for e in diag_reset["evidence"])
+
+    # Case C: Structured missing_fields entry
+    host_snap_mf = {
+        "cpu_psi_some_avg10_pct": 1.0,
+        "net_rx_softirq_delta_per_cpu": [{"cpu_id": 0, "delta": 100, "reason": None}],
+        "missing_fields": [{"metric": "cpu_psi_some_avg10_pct", "reason": "proc_psi_unavailable"}],
+    }
+    diag_mf = evaluate_candidate_diagnosis(healthy_client_win, host_snap_mf, thresholds)
+    assert diag_mf["label"] == "uncertain"
+    assert any("proc_psi_unavailable" in e for e in diag_mf["evidence"])
+
+    # Case D: Softnet drop pressure present even when P99 latency is below target
+    host_snap_softnet_pressure = {
+        "cpu_psi_some_avg10_pct": 1.0,
+        "net_rx_softirq_delta_per_cpu": [{"cpu_id": 0, "delta": 100, "reason": None}],
+        "softnet_dropped_delta_per_cpu": [{"cpu_id": 0, "delta": 5, "reason": None}],
+        "softnet_time_squeeze_delta_per_cpu": [{"cpu_id": 0, "delta": 0, "reason": None}],
+    }
+    diag_sp = evaluate_candidate_diagnosis(healthy_client_win, host_snap_softnet_pressure, thresholds)
+    assert diag_sp["label"] != "normal"  # Inhibit normal on softnet drop pressure
+
+
+def test_controller_observe_only_no_fabricated_readbacks(tmp_path: Path):
+    """Requirement 4: Verify observe-only controller does not fabricate live CPUWeight state.
+    'before', 'requested', and 'after' must be null. Validates strictly against schema.
+    """
+    event_log = tmp_path / "controller_event.jsonl"
+    fake_boot = "boot-unmodified-test"
+
+    controller = AuraController(
+        contracts_dir=CONTRACTS_DIR,
+        thresholds_path=THRESHOLDS_PATH,
+        event_log_path=event_log,
+        server_boot_id=fake_boot,
+        monotonic_provider=lambda: 500.0,
+        epoch_provider=lambda: 1794230000.0,
+        controller_mode="observe_only",
+    )
+
+    client_win = load_example("client_window_ingested.example.json")
+    client_win["server_boot_id"] = fake_boot
+    client_win["server_received_at_monotonic_s"] = 499.0
+
+    host_snap = load_example("host_snapshot.example.json")
+    host_snap["host_boot_id"] = fake_boot
+    host_snap["snapshot_monotonic_s"] = 499.0
+
+    controller.update_client_window(client_win)
+    controller.update_host_snapshot(host_snap)
+
+    event = controller.evaluate_cycle()
+    controller.event_validator.validate(event)
+
+    action = event["action"]
+    assert action["type"] == "no_op"
+    assert action["status"] in ("not_attempted", "dry_run")
+    assert action["before"] is None
+    assert action["requested"] is None
+    assert action["after"] is None
+    assert action["rollback_attempted"] is None
+    assert action["rollback_verified"] is None
+    assert action["error"] is None

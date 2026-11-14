@@ -418,3 +418,50 @@ def test_concurrent_requests_handling(running_server):
     lines = output_file.read_text(encoding="utf-8").strip().splitlines()
     # Exactly 10 reports persisted
     assert len(lines) == 10
+
+
+# ============================================================================
+# Regression Tests for Content-Length Hardening (Requirement 5)
+# ============================================================================
+
+def test_report_negative_content_length(running_server):
+    """Requirement 5: Negative Content-Length header is rejected with HTTP 400."""
+    _, base_url, _ = running_server
+    req = Request(
+        f"{base_url}/report",
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Content-Length": "-50"},
+        method="POST",
+    )
+    with pytest.raises(HTTPError) as exc_info:
+        urlopen(req)
+    assert exc_info.value.code == 400
+
+
+def test_report_malformed_content_length(running_server):
+    """Requirement 5: Non-integer Content-Length header is rejected with HTTP 400."""
+    _, base_url, _ = running_server
+    req = Request(
+        f"{base_url}/report",
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Content-Length": "not-an-integer"},
+        method="POST",
+    )
+    with pytest.raises(HTTPError) as exc_info:
+        urlopen(req)
+    assert exc_info.value.code == 400
+
+
+def test_report_zero_length_body(running_server):
+    """Requirement 5: Empty request body (Content-Length: 0) is rejected with HTTP 400."""
+    _, base_url, _ = running_server
+    req = Request(
+        f"{base_url}/report",
+        data=b"",
+        headers={"Content-Type": "application/json", "Content-Length": "0"},
+        method="POST",
+    )
+    with pytest.raises(HTTPError) as exc_info:
+        urlopen(req)
+    assert exc_info.value.code == 400
+

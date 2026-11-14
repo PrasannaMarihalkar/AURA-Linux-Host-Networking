@@ -126,23 +126,42 @@ class AuraController:
             host_snapshot = dict(self._latest_host_snapshot) if self._latest_host_snapshot is not None else None
 
         # Freshness checking
-        max_age_s = float(self.thresholds.get("max_client_report_age_seconds", 15.0))
+        max_client_age_s = float(self.thresholds.get("max_client_report_age_seconds", 15.0))
+        max_host_age_s = float(self.thresholds.get("max_host_snapshot_age_seconds", max_client_age_s))
         is_stale = False
         report_age_s: float | None = None
         boot_id_mismatch = False
 
         if client_window is not None:
-            report_mono = client_window.get("server_received_at_monotonic_s")
-            report_boot_id = client_window.get("server_boot_id", "")
-            if report_mono is not None:
-                is_stale, report_age_s, reason = check_monotonic_freshness(
+            client_report_mono = client_window.get("server_received_at_monotonic_s")
+            client_report_boot_id = client_window.get("server_boot_id", "")
+            if client_report_mono is not None:
+                client_stale, report_age_s, reason = check_monotonic_freshness(
                     server_monotonic_now=now_mono,
-                    report_monotonic_s=report_mono,
+                    report_monotonic_s=client_report_mono,
                     current_server_boot_id=current_boot_id,
-                    report_server_boot_id=report_boot_id,
-                    max_report_age_s=max_age_s,
+                    report_server_boot_id=client_report_boot_id,
+                    max_report_age_s=max_client_age_s,
                 )
+                if client_stale:
+                    is_stale = True
                 if reason == "server_boot_id_mismatch":
+                    boot_id_mismatch = True
+
+        if host_snapshot is not None:
+            host_snap_mono = host_snapshot.get("snapshot_monotonic_s")
+            host_snap_boot_id = host_snapshot.get("host_boot_id", "")
+            if host_snap_mono is not None:
+                host_stale, host_snap_age_s, host_reason = check_monotonic_freshness(
+                    server_monotonic_now=now_mono,
+                    report_monotonic_s=host_snap_mono,
+                    current_server_boot_id=current_boot_id,
+                    report_server_boot_id=host_snap_boot_id,
+                    max_report_age_s=max_host_age_s,
+                )
+                if host_stale:
+                    is_stale = True
+                if host_reason == "server_boot_id_mismatch":
                     boot_id_mismatch = True
 
         # Run diagnosis engine
@@ -167,13 +186,11 @@ class AuraController:
             "active system adjustments are inhibited."
         )
 
-        # Baseline before/requested readback representation for observe-only logging
-        cpu_weight_baseline = self.thresholds.get("cpu_weight_baseline", 100)
-        cpu_weight_step = self.thresholds.get("cpu_weight_step", 200)
-
-        before_state = {"aura-app.slice": cpu_weight_baseline, "aura-bg.slice": cpu_weight_baseline}
-        requested_state = {"aura-app.slice": cpu_weight_step} if diag_label == "cpu_contention_candidate" else None
-        after_state = before_state  # in observe-only, no change is made
+        # In observe-only Gate B, no live CPUWeight state is read or modified.
+        # Do not fabricate 'before', 'requested', or 'after' readback evidence.
+        before_state = None
+        requested_state = None
+        after_state = None
 
         action_record = {
             "type": action_type,

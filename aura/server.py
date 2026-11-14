@@ -95,7 +95,7 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
         """Route internal server messages through standard logging."""
         logger.info("%s - - [%s] %s", self.client_address[0], self.log_date_time_string(), format % args)
 
-    def _send_json_response(self, status_code: int, data: dict[str, Any]) -> None:
+    def _send_json_response(self, status_code: int, data: dict[str, Any], close_connection: bool = False) -> None:
         """Serialize and send a JSON response with proper headers."""
         try:
             payload = json.dumps(data, allow_nan=False).encode("utf-8")
@@ -110,15 +110,17 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        if close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_error_json(self, status_code: int, error_code: str, message: str) -> None:
+    def _send_error_json(self, status_code: int, error_code: str, message: str, close_connection: bool = False) -> None:
         """Send a structured JSON error response."""
         self._send_json_response(status_code, {
             "error": error_code,
             "message": message,
-        })
+        }, close_connection=close_connection)
 
     def do_GET(self) -> None:
         """Handle GET endpoints: /health and /work."""
@@ -185,30 +187,49 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
     def _handle_report(self) -> None:
         """Handle POST /report: 4-stage validated benchmark window ingestion."""
         content_length_str = self.headers.get("Content-Length")
-        if not content_length_str:
+        if content_length_str is None or not content_length_str.strip():
             self._send_error_json(400, "missing_content_length", "Content-Length header is required.")
             return
 
         try:
-            content_length = int(content_length_str)
-        except ValueError:
-            self._send_error_json(400, "invalid_content_length", "Content-Length header must be an integer.")
+            content_length = int(content_length_str.strip())
+        except (ValueError, TypeError):
+            self._send_error_json(400, "invalid_content_length", "Content-Length header must be a valid integer.")
+            return
+
+        if content_length < 0:
+            self._send_error_json(400, "invalid_content_length", "Content-Length cannot be negative.")
             return
 
         server = self.server  # type: ignore[attr-defined]
         max_bytes = getattr(server, "max_body_bytes", DEFAULT_MAX_REQUEST_BODY_BYTES)
         if content_length > max_bytes:
+            # Drain body if small enough or close connection so framing is not corrupted
+            self.close_connection = True
             self._send_error_json(
                 413,
                 "payload_too_large",
-                f"Payload size {content_length} bytes exceeds maximum permitted {max_bytes} bytes."
+                f"Payload size {content_length} bytes exceeds maximum permitted {max_bytes} bytes.",
+                close_connection=True,
             )
+            return
+
+        if content_length == 0:
+            self._send_error_json(400, "empty_payload", "Request body cannot be empty.")
             return
 
         try:
             raw_body = self.rfile.read(content_length)
         except Exception as exc:
             self._send_error_json(400, "read_error", f"Failed to read request body: {exc}")
+            return
+
+        if len(raw_body) != content_length:
+            self._send_error_json(
+                400,
+                "incomplete_read",
+                f"Expected {content_length} bytes, but only received {len(raw_body)} bytes."
+            )
             return
 
         try:
