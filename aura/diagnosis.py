@@ -187,15 +187,33 @@ def evaluate_candidate_diagnosis(
     has_missing_essential_telemetry = False
     missing_reasons: list[str] = []
 
+    # Partition structured missing_fields: essential signals vs optional metadata.
+    # Essential signals for diagnosis:
+    # - cpu_psi_some_*
+    # - net_rx_softirq_delta_per_cpu
+    # - softnet_*
+    # Optional metadata:
+    # - interface_driver, rx_queue_count, rps_masks_by_rx_queue, network_irq_*
+    ESSENTIAL_METRICS = {
+        "cpu_psi_some_avg10_pct",
+        "net_rx_softirq_delta_per_cpu",
+        "softnet_processed_delta_per_cpu",
+        "softnet_dropped_delta_per_cpu",
+        "softnet_time_squeeze_delta_per_cpu",
+    }
+
     if missing_fields:
         for mf in missing_fields:
             if isinstance(mf, dict):
                 metric_name = mf.get("metric", "unknown")
                 reason_code = mf.get("reason", "unspecified")
-                missing_reasons.append(f"{metric_name} ({reason_code})")
-        if missing_reasons:
-            has_missing_essential_telemetry = True
-            evidence.append(f"Host telemetry reports missing/reset fields: {', '.join(missing_reasons)}.")
+                if metric_name in ESSENTIAL_METRICS:
+                    missing_reasons.append(f"{metric_name} ({reason_code})")
+                    has_missing_essential_telemetry = True
+                else:
+                    evidence.append(f"Optional host metadata unavailable: {metric_name} ({reason_code}).")
+        if has_missing_essential_telemetry:
+            evidence.append(f"Essential host telemetry reports missing/reset fields: {', '.join(missing_reasons)}.")
 
     # Check per-CPU deltas for null/reset reasons when present
     if net_rx_deltas is None and "net_rx_softirq_delta_per_cpu" in host_snapshot:
@@ -321,8 +339,10 @@ def evaluate_candidate_diagnosis(
             "conflicting_evidence": False,
         }
 
-    # Softnet drop or high RX skew
-    if rx_skew_detected or (softnet_drops_total >= min_dropped_thresh and latency_degraded):
+    # True RX activity skew: requires measured NET_RX softIRQ skew ratio threshold met.
+    # If latency target is calibrated and latency is degraded, confidence is high;
+    # if latency target is not configured or latency is not degraded, still detects observed receive skew.
+    if rx_skew_detected:
         confidence = 0.80 if p99_status == "minimum_tail_count_met" else 0.50
         return {
             "label": "rx_activity_skew_candidate",
@@ -339,6 +359,22 @@ def evaluate_candidate_diagnosis(
             "confidence": confidence,
             "evidence": evidence,
             "limitations": limitations,
+            "conflicting_evidence": False,
+        }
+
+    # Softnet drops without confirmed per-CPU NET_RX skew:
+    # Under v1.2 contract, backlog frame drops indicate receive-path buffer pressure.
+    # When latency is degraded, this indicates receive-path congestion.
+    if softnet_drops_total >= min_dropped_thresh and latency_degraded:
+        evidence.append(
+            "Softnet backlog frame drops observed without corroborating NET_RX softIRQ per-CPU imbalance; "
+            "evaluated as receive-path pressure candidate."
+        )
+        return {
+            "label": "rx_activity_skew_candidate",
+            "confidence": 0.65 if p99_status == "minimum_tail_count_met" else 0.40,
+            "evidence": evidence,
+            "limitations": limitations + ["Softnet backlog frame drops indicate host receive buffer pressure; per-CPU skew was not corroborated."],
             "conflicting_evidence": False,
         }
 
