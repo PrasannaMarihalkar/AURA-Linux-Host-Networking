@@ -70,6 +70,7 @@ def test_aggregate_jsonl_and_csv_output(tmp_path: Path):
 
 
 def test_plotter_creates_actual_data_figures_and_raw_distribution(tmp_path: Path):
+    pytest.importorskip("matplotlib")
     samples = tmp_path / "latencies.csv"
     samples.write_text(
         "run_id,scenario,window_id,latency_ms\n"
