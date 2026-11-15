@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import platform
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,9 @@ SYS_CPU_ROOT = Path("/sys/devices/system/cpu")
 # The first call needs two samples to produce a valid positive interval.
 INITIAL_SAMPLE_DELAY_S = 1.0
 
-# Previous raw readings, maintained within this Python process.
+# Previous raw readings, maintained within this Python process protected by lock.
 _BASELINE: dict[str, Any] | None = None
+_BASELINE_LOCK = threading.Lock()
 
 
 def _add_missing(
@@ -153,31 +155,34 @@ def read_softirqs() -> dict | None:
 
 
 def read_softnet_stat() -> dict | None:
-    """Read per-CPU processed, dropped and time-squeeze counters."""
+    """Read per-CPU processed, dropped and time-squeeze counters.
+
+    Linux exposes softnet statistics in /proc/net/softnet_stat.
+    Depending on the kernel version and configuration, lines may correspond
+    to all possible CPUs, or exclusively online CPUs. Additionally, Linux 5.x+
+    may append an explicit hex CPU core ID in column 11 (0-indexed).
+    This function detects the kernel format, validates unique CPU IDs,
+    and returns a mapping of online CPU IDs to their softnet metrics.
+    """
 
     try:
         content = (PROC_ROOT / "net" / "softnet_stat").read_text()
     except OSError:
         return None
 
-    lines = [line for line in content.splitlines() if line.strip()]
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
 
     if not lines:
         return None
 
     try:
         possible_file = SYS_CPU_ROOT / "possible"
-
         if possible_file.exists():
             possible_cpus = _parse_cpu_list(possible_file.read_text())
         else:
             possible_cpus = list(range(len(lines)))
 
-        if len(possible_cpus) != len(lines):
-            return None
-
         online_file = SYS_CPU_ROOT / "online"
-
         if online_file.exists():
             online_cpus = set(_parse_cpu_list(online_file.read_text()))
         else:
@@ -185,20 +190,55 @@ def read_softnet_stat() -> dict | None:
 
         result = {}
 
-        for cpu_id, line in zip(possible_cpus, lines):
-            values = line.split()
+        # Check if lines have an explicit CPU ID in column 11 (12+ fields)
+        first_row_fields = lines[0].split()
+        has_explicit_cpu_id = False
+        if len(first_row_fields) >= 12:
+            try:
+                cpu_candidate = int(first_row_fields[11], 16)
+                if cpu_candidate in possible_cpus:
+                    has_explicit_cpu_id = True
+            except ValueError:
+                has_explicit_cpu_id = False
 
+        if has_explicit_cpu_id:
+            for line in lines:
+                values = line.split()
+                if len(values) < 12:
+                    return None
+                cpu_id = int(values[11], 16)
+                if cpu_id not in possible_cpus or cpu_id in result:
+                    return None
+                processed = int(values[0], 16)
+                dropped = int(values[1], 16)
+                time_squeeze = int(values[2], 16)
+                if min(processed, dropped, time_squeeze) < 0:
+                    return None
+                if cpu_id in online_cpus:
+                    result[cpu_id] = {
+                        "processed": processed,
+                        "dropped": dropped,
+                        "time_squeeze": time_squeeze,
+                    }
+            return result
+
+        # Fallback: if lines count matches online_cpus count, map to sorted online_cpus
+        if len(lines) == len(online_cpus):
+            cpu_ids_to_map = sorted(online_cpus)
+        elif len(lines) == len(possible_cpus):
+            cpu_ids_to_map = possible_cpus
+        else:
+            return None
+
+        for cpu_id, line in zip(cpu_ids_to_map, lines):
+            values = line.split()
             if len(values) < 3:
                 return None
-
             processed = int(values[0], 16)
             dropped = int(values[1], 16)
             time_squeeze = int(values[2], 16)
-
             if min(processed, dropped, time_squeeze) < 0:
                 return None
-
-            # Only online CPUs participate in the current interval.
             if cpu_id in online_cpus:
                 result[cpu_id] = {
                     "processed": processed,
@@ -270,7 +310,13 @@ def read_interface_stats(interface: str | None) -> dict | None:
 
 
 def read_network_irq(interface: str | None) -> dict | None:
-    """Find IRQ lines associated with a network interface."""
+    """Find IRQ lines associated with a network interface.
+
+    Supports exact interface matches and multi-queue vector labels
+    such as enp1s0-rx-0, enp1s0-tx-1, or enp1s0-0.
+    Accumulates counts across all dedicated queue IRQ lines. If any matching
+    IRQ line is shared with non-interface devices, marks shared=True.
+    """
 
     if not interface:
         return None
@@ -279,6 +325,21 @@ def read_network_irq(interface: str | None) -> dict | None:
         content = (PROC_ROOT / "interrupts").read_text()
     except OSError:
         return None
+
+    matched_irqs: list[str] = []
+    total_count = 0
+    sources: list[str] = []
+    any_shared = False
+
+    def _matches_interface(lbl: str) -> bool:
+        if lbl == interface:
+            return True
+        if lbl.startswith(f"{interface}-"):
+            suffix = lbl[len(interface) + 1:]
+            # Must be a queue or vector identifier (e.g. rx-0, tx-0, 0, fp-0)
+            if any(suffix.startswith(prefix) for prefix in ("rx", "tx", "fp", "queue")) or suffix.isdigit():
+                return True
+        return False
 
     for line in content.splitlines():
         if ":" not in line:
@@ -292,7 +353,6 @@ def read_network_irq(interface: str | None) -> dict | None:
 
         try:
             cpu_count = 0
-
             for value in parts:
                 if value.isdigit():
                     cpu_count += 1
@@ -305,27 +365,34 @@ def read_network_irq(interface: str | None) -> dict | None:
             counts = [int(value) for value in parts[:cpu_count]]
             source = " ".join(parts[cpu_count:])
 
-            # Device labels are comma-separated on shared IRQ lines.
             labels = [
                 part.strip().split()[-1]
                 for part in source.split(",")
                 if part.strip()
             ]
 
-            if interface not in labels:
+            interface_matches = [lbl for lbl in labels if _matches_interface(lbl)]
+            if not interface_matches:
                 continue
 
-            return {
-                "irq": irq.strip(),
-                "count": sum(counts),
-                "source": source,
-                "shared": len(labels) > 1,
-            }
+            matched_irqs.append(irq.strip())
+            total_count += sum(counts)
+            sources.append(source)
+            if len(labels) > len(interface_matches):
+                any_shared = True
 
         except (ValueError, IndexError):
-            return None
+            continue
 
-    return None
+    if not matched_irqs:
+        return None
+
+    return {
+        "irq": ",".join(matched_irqs),
+        "count": total_count,
+        "source": "; ".join(sources),
+        "shared": any_shared,
+    }
 
 
 def read_host_metadata() -> dict:
@@ -687,38 +754,39 @@ def collect_snapshot(interface: str | None) -> dict:
 
     global _BASELINE
 
-    first_sample = _capture_raw(interface)
+    with _BASELINE_LOCK:
+        first_sample = _capture_raw(interface)
 
-    needs_new_baseline = (
-        _BASELINE is None
-        or _BASELINE["host_boot_id"] != first_sample["host_boot_id"]
-        or _BASELINE["interface"] != interface
-    )
+        needs_new_baseline = (
+            _BASELINE is None
+            or _BASELINE["host_boot_id"] != first_sample["host_boot_id"]
+            or _BASELINE["interface"] != interface
+        )
 
-    if needs_new_baseline:
-        previous = first_sample
+        if needs_new_baseline:
+            previous = first_sample
 
-        # Retry if the machine reboots while establishing the baseline.
-        for _ in range(3):
-            time.sleep(INITIAL_SAMPLE_DELAY_S)
-            current = _capture_raw(interface)
+            # Retry if the machine reboots while establishing the baseline.
+            for _ in range(3):
+                time.sleep(INITIAL_SAMPLE_DELAY_S)
+                current = _capture_raw(interface)
 
-            if current["host_boot_id"] == previous["host_boot_id"]:
-                break
+                if current["host_boot_id"] == previous["host_boot_id"]:
+                    break
 
-            previous = current
+                previous = current
+            else:
+                raise RuntimeError(
+                    "Host boot identity changed repeatedly during sampling"
+                )
+
         else:
-            raise RuntimeError(
-                "Host boot identity changed repeatedly during sampling"
-            )
+            previous = _BASELINE
+            current = first_sample
 
-    else:
-        previous = _BASELINE
-        current = first_sample
+        snapshot = _build_snapshot(current, previous)
 
-    snapshot = _build_snapshot(current, previous)
+        # Keep the raw current counters for the next collection call.
+        _BASELINE = current
 
-    # Keep the raw current counters for the next collection call.
-    _BASELINE = current
-
-    return snapshot
+        return snapshot
