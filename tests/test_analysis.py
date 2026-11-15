@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
 from analysis.aggregate import aggregate_records, load_jsonl, write_summary_csv
 from analysis.plot_results import load_latency_samples, plot_records
