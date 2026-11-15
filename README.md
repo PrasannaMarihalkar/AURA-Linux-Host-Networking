@@ -79,7 +79,10 @@ AURA-Linux-Host-Networking/
 │   ├── contracts.py                         # Pure contract validation and invariant helpers
 │   ├── server.py                            # Baseline workload HTTP server (/health, /work, /report)
 │   ├── controller.py                        # Observe-only controller daemon & periodic evaluation loop
-│   └── diagnosis.py                         # Rule-based candidate root-cause diagnosis engine
+│   ├── diagnosis.py                         # Rule-based candidate root-cause diagnosis engine
+│   ├── telemetry.py                         # Host telemetry sampling (/proc/pressure, softnet, IRQ, softirq)
+│   ├── client.py                            # Multi-threaded benchmark client with streaming window coordinator
+│   └── runtime.py                           # Integrated runtime daemon coordinating server, telemetry, controller
 ├── config/
 │   └── thresholds.json                      # Baseline threshold and timing configuration parameters
 ├── contracts/
@@ -97,18 +100,29 @@ AURA-Linux-Host-Networking/
 │       └── action_record.example.json
 ├── docs/                                    # Architectural and research documentation
 │   ├── architecture/
-│   │   └── gate_b_design.md                 # Gate B design and implementation specification
-│   ├── research/
-│   └── decisions/
+│   │   ├── gate_b_design.md                 # Gate B design and implementation specification
+│   │   ├── telemetry_signals.md             # Telemetry collection specification
+│   │   └── runtime_integration.md           # Integrated runtime architecture and lifecycle
+│   ├── benchmark_client.md                  # Benchmark client usage and configuration
+│   └── reviews/
+│       └── AURA_ENGINEERING_AUDIT.md        # Comprehensive pre-integration engineering audit
 ├── experiments/                             # Workload and benchmarking automation scripts
+│   ├── run_baseline.sh                      # Zero-load baseline run automation
+│   └── run_workload.sh                      # Under-load benchmark run automation
 ├── analysis/                                # Aggregation and plotting scripts
+│   ├── aggregate.py                         # Metrics aggregator and summary generator
+│   └── plot_results.py                      # Latency distribution and timeline plotter
 ├── tests/
 │   ├── __init__.py
 │   ├── test_contracts.py                   # Pytest suite for contract schemas and semantic rules (64 tests)
-│   ├── test_server.py                      # Pytest suite for HTTP server endpoints and ingestion (23 tests)
-│   └── test_controller.py                  # Pytest suite for diagnosis engine & controller loop (13 tests)
+│   ├── test_server.py                      # Pytest suite for HTTP server endpoints and ingestion (26 tests)
+│   ├── test_controller.py                  # Pytest suite for diagnosis engine & controller loop (18 tests)
+│   ├── test_telemetry.py                   # Pytest suite for Linux host telemetry collection (24 tests)
+│   ├── test_client.py                      # Pytest suite for benchmark client and coordinator (24 tests)
+│   ├── test_analysis.py                    # Pytest suite for analysis aggregators and plotters (5 tests)
+│   └── test_runtime.py                     # Pytest suite for end-to-end runtime integration (3 tests)
 ├── requirements.txt                         # Runtime dependencies (jsonschema)
-├── requirements-dev.txt                     # Development and testing dependencies (pytest)
+├── requirements-dev.txt                     # Development and testing dependencies (pytest, matplotlib)
 ├── CONTRIBUTING.md                          # Contribution guidelines and merge gates
 └── README.md                                # Project overview and documentation
 ```
@@ -126,7 +140,7 @@ pip install -r requirements-dev.txt
 # 2. Syntax compilation check across modules
 python3 -m compileall -q aura analysis tests
 
-# 3. Run complete test suite using pytest (100 tests)
+# 3. Run complete test suite using pytest (164 tests)
 python3 -m pytest -v tests/
 
 # 4. Validate all contract schemas, fixtures, and configuration files
@@ -134,11 +148,12 @@ for f in contracts/*.schema.json contracts/examples/*.json config/*.json; do
     python3 -m json.tool "$f" > /dev/null
 done
 
-# 5. Start the AURA HTTP server
-python3 -m aura.server
+# 5. Start the complete integrated AURA runtime daemon
+python3 -m aura.runtime --host 127.0.0.1 --port 8080 --interface eth0 --results-dir results
 
-# 6. Start the observe-only controller
-python3 -m aura.controller
+# 6. Execute benchmark experiment workloads
+./experiments/run_baseline.sh
+./experiments/run_workload.sh
 ```
 
 ---
