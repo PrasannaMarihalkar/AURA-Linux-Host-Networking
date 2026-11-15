@@ -204,7 +204,12 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
         server = self.server  # type: ignore[attr-defined]
         max_bytes = getattr(server, "max_body_bytes", DEFAULT_MAX_REQUEST_BODY_BYTES)
         if content_length > max_bytes:
-            # Drain body if small enough or close connection so framing is not corrupted
+            # Drain body if reasonable so the client can receive the HTTP 413 response cleanly
+            try:
+                drain_len = min(content_length, 1024 * 1024)
+                self.rfile.read(drain_len)
+            except Exception:
+                pass
             self.close_connection = True
             self._send_error_json(
                 413,
@@ -282,6 +287,35 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "semantic_invariant_violation", f"Stage 2 Semantic Invariant Violation: {exc}")
             return
 
+        # Deduplication & Idempotency Check
+        run_id = str(ingress_payload["run_id"])
+        window_id = int(ingress_payload["window_id"])
+        window_key = (run_id, window_id)
+
+        dedup_cache = getattr(server, "ingestion_dedup_cache", None)
+        dedup_lock = getattr(server, "dedup_lock", None)
+        if dedup_cache is not None and dedup_lock is not None:
+            with dedup_lock:
+                existing_payload = dedup_cache.get(window_key)
+                if existing_payload is not None:
+                    # Compare content (excluding server receipt fields)
+                    if existing_payload == ingress_payload:
+                        # Idempotent response for identical duplicate
+                        self._send_json_response(200, {
+                            "status": "accepted_duplicate_idempotent",
+                            "run_id": run_id,
+                            "window_id": window_id,
+                        })
+                        return
+                    else:
+                        # Conflicting payload with existing identity
+                        self._send_error_json(
+                            409,
+                            "conflict_duplicate_window",
+                            f"Window {window_key} has already been ingested with conflicting payload."
+                        )
+                        return
+
         # Stage 3: Server-Owned Receipt Timestamping & Boot Identity
         time_provider: Callable[[], float] = getattr(server, "epoch_provider", time.time)
         mono_provider: Callable[[], float] = getattr(server, "monotonic_provider", time.monotonic)
@@ -327,6 +361,19 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(500, "storage_error", "Failed to persist enriched measurement record.")
                 return
 
+        # Record in dedup cache
+        if dedup_cache is not None and dedup_lock is not None:
+            with dedup_lock:
+                dedup_cache[window_key] = dict(ingress_payload)
+
+        # Notify optional runtime callback or handoff queue
+        on_report_ingested = getattr(server, "on_report_ingested", None)
+        if on_report_ingested is not None:
+            try:
+                on_report_ingested(enriched_record)
+            except Exception as exc:
+                logger.warning("on_report_ingested callback encountered error: %s", exc)
+
         self._send_json_response(200, {
             "status": "accepted",
             "run_id": enriched_record["run_id"],
@@ -367,11 +414,17 @@ class AuraServer:
         epoch_provider: Callable[[], float] | None = None,
         monotonic_provider: Callable[[], float] | None = None,
         boot_id_provider: Callable[[], str] | None = None,
+        on_report_ingested: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.max_work_iters = max_work_iters
         self.max_body_bytes = max_body_bytes
+        self.on_report_ingested = on_report_ingested
+        self.output_file = Path(output_file).resolve()
+        self.ingestion_dedup_cache: dict[tuple[str, int], dict[str, Any]] = {}
+        self.dedup_lock = threading.Lock()
+        self._load_existing_dedup_cache()
 
         # Resolve schemas directory
         if contracts_dir is None:
@@ -411,8 +464,42 @@ class AuraServer:
         self.http_server.epoch_provider = self.epoch_provider  # type: ignore[attr-defined]
         self.http_server.monotonic_provider = self.monotonic_provider  # type: ignore[attr-defined]
         self.http_server.boot_id_provider = self.boot_id_provider  # type: ignore[attr-defined]
+        self.http_server.on_report_ingested = self.on_report_ingested  # type: ignore[attr-defined]
+        self.http_server.ingestion_dedup_cache = self.ingestion_dedup_cache  # type: ignore[attr-defined]
+        self.http_server.dedup_lock = self.dedup_lock  # type: ignore[attr-defined]
 
         self._thread: threading.Thread | None = None
+
+    def _load_existing_dedup_cache(self) -> None:
+        """Populate ingestion dedup cache from pre-existing records in output_file."""
+        if not self.output_file.exists():
+            return
+        try:
+            with self.output_file.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        run_id = rec.get("run_id")
+                        window_id = rec.get("window_id")
+                        if run_id is not None and window_id is not None:
+                            clean_payload = {
+                                k: v
+                                for k, v in rec.items()
+                                if k
+                                not in {
+                                    "server_received_at_epoch_s",
+                                    "server_received_at_monotonic_s",
+                                    "server_boot_id",
+                                }
+                            }
+                            self.ingestion_dedup_cache[(str(run_id), int(window_id))] = clean_payload
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.warning("Failed to recover dedup cache from %s: %s", self.output_file, exc)
 
     def start(self, background: bool = False) -> None:
         """Start the HTTP server."""
