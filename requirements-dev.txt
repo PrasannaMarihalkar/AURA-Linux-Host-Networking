@@ -1,3 +1,4 @@
-# Development, testing, and CI dependencies for AURA
+# Development, testing, and benchmark-analysis dependencies for AURA
 -r requirements.txt
+-r requirements-analysis.txt
 pytest>=8.0.0
