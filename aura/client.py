@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import queue
 import socket
 import threading
 import time
@@ -480,6 +481,7 @@ def run_benchmark(
     base_metadata: dict[str, Any] = {
         "client_hostname": socket.gethostname(),
         "load_model": "closed_loop_fixed_concurrency",
+        "load_model_note": "Closed-loop benchmark subject to coordinated omission during server latency spikes",
         "timing_source": "time.monotonic",
         "client_wall_clock_is_metadata_only": True,
         "target_url": work_url,
@@ -488,9 +490,50 @@ def run_benchmark(
         **(dict(metadata) if metadata else {}),
     }
 
-    def _finalize_window(window_idx: int, window_outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    delivery_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=1000)
+    delivery_worker_thread: threading.Thread | None = None
+
+    def delivery_worker_loop() -> None:
+        """Asynchronously deliver completed window records to /report with bounded retries."""
+        while True:
+            item = delivery_queue.get()
+            if item is None:
+                delivery_queue.task_done()
+                break
+            record = item
+            max_retries = 2
+            success = False
+            last_err = None
+            for attempt in range(max_retries + 1):
+                ok, err = _post_window(final_report_url, record, timeout_s)
+                if ok:
+                    success = True
+                    break
+                last_err = err
+                if attempt < max_retries:
+                    time.sleep(0.05 * (2 ** attempt))
+            if success:
+                record["metadata"]["report_submission"] = "accepted"
+                LOGGER.info("window %s accepted by server /report", record["window_id"])
+            else:
+                record["metadata"]["report_submission"] = "failed"
+                record["metadata"]["report_submission_error"] = last_err
+                LOGGER.warning("window %s report submission failed after %d retries: %s", record["window_id"], max_retries, last_err)
+            delivery_queue.task_done()
+
+    if submit_reports:
+        delivery_worker_thread = threading.Thread(target=delivery_worker_loop, name="aura-delivery", daemon=True)
+        delivery_worker_thread.start()
+
+    def _finalize_window(
+        window_idx: int,
+        window_outcomes: list[dict[str, Any]],
+        actual_duration: float | None = None,
+    ) -> dict[str, Any]:
         offset = window_idx * window_s
-        actual_duration = float(window_s)
+        if actual_duration is None:
+            actual_duration = float(window_s)
+        actual_duration = max(1e-6, float(actual_duration))
         latencies = [float(item["latency_ms"]) for item in window_outcomes if item["success"]]
         successes = len(latencies)
         errors = len(window_outcomes) - successes
@@ -505,6 +548,7 @@ def run_benchmark(
             "window_end_offset_s": window_end_offset,
             "configured_window_s": window_s,
             "generation_duration_s": duration_s,
+            "actual_window_duration_s": actual_duration,
             "terminal_outcomes_in_window": requests,
         })
         record = {
@@ -533,13 +577,12 @@ def run_benchmark(
         json.dumps(record, allow_nan=False)
 
         if submit_reports:
-            accepted, error = _post_window(final_report_url, record, timeout_s)
-            record["metadata"]["report_submission"] = "accepted" if accepted else "failed"
-            if error:
-                record["metadata"]["report_submission_error"] = error
-                LOGGER.warning("window %s report submission failed: %s", record["window_id"], error)
-            else:
-                LOGGER.info("window %s accepted by server /report", record["window_id"])
+            record["metadata"]["report_submission"] = "enqueued"
+            try:
+                delivery_queue.put_nowait(record)
+            except queue.Full:
+                record["metadata"]["report_submission"] = "dropped_queue_full"
+                LOGGER.error("client report delivery queue is full; dropping report for window %s", record["window_id"])
 
         return record
 
@@ -560,7 +603,7 @@ def run_benchmark(
                             o for o in outcomes
                             if w_start <= float(o["completed_at"]) < w_end
                         ]
-                    record = _finalize_window(w_idx, w_outcomes)
+                    record = _finalize_window(w_idx, w_outcomes, actual_duration=float(window_s))
                     with records_lock:
                         records.append(record)
                         closed_windows.add(w_idx)
@@ -604,17 +647,24 @@ def run_benchmark(
 
     for w_idx in range(total_windows):
         if w_idx not in closed_windows:
-            w_start = start_monotonic_s + w_idx * window_s
-            w_end = w_start + window_s
+            offset = w_idx * window_s
+            actual_dur = min(float(window_s), max(1e-6, effective_elapsed - offset))
+            w_start = start_monotonic_s + offset
+            w_end = w_start + actual_dur
             with outcome_lock:
                 w_outcomes = [
                     o for o in outcomes
                     if (w_start <= float(o["completed_at"]) < w_end) or (w_idx == total_windows - 1 and float(o["completed_at"]) >= w_start)
                 ]
-            record = _finalize_window(w_idx, w_outcomes)
+            record = _finalize_window(w_idx, w_outcomes, actual_duration=actual_dur)
             with records_lock:
                 records.append(record)
                 closed_windows.add(w_idx)
+
+    # Wait for all enqueued reports to be delivered
+    if submit_reports and delivery_worker_thread is not None:
+        delivery_queue.put(None)
+        delivery_worker_thread.join(timeout=5.0)
 
     records.sort(key=lambda r: int(r["window_id"]))
 

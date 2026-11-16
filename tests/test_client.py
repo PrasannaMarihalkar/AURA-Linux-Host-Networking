@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 import threading
 import time
@@ -339,3 +340,119 @@ def test_run_benchmark_writes_raw_successful_latency_sidecar(mock_server, tmp_pa
     assert len(samples) == successes
     assert all(float(sample["latency_ms"]) >= 0 for sample in samples)
     assert all(sample["run_id"] == "raw-latencies" for sample in samples)
+
+
+def test_run_benchmark_duration_not_divisible_by_window_size(mock_server):
+    """Test that non-divisible durations produce accurate partial final window duration."""
+    records = run_benchmark(
+        mock_server,
+        duration_s=3,
+        workers=2,
+        window_s=2,
+        timeout_s=1.0,
+        run_id="partial-window-run",
+    )
+    assert len(records) >= 2
+    # Window 1: full 2s window
+    w1 = records[0]
+    assert math.isclose(w1["window_duration_s"], 2.0, rel_tol=1e-2)
+    # Window 2: partial window (~1s duration, strictly less than configured 2s)
+    w2 = records[1]
+    assert w2["window_duration_s"] < 1.8
+    assert math.isclose(
+        w2["throughput_rps"],
+        w2["successes"] / w2["window_duration_s"],
+        rel_tol=1e-6,
+    )
+
+
+def test_build_window_records_with_empty_and_boundary_outcomes():
+    """Test _build_window_records correctly formats empty and boundary outcomes."""
+    from aura.client import _build_window_records
+
+    # Outcomes only in window 0; window 1 is completely empty
+    outcomes = [
+        {"completed_at": 100.5, "latency_ms": 12.0, "success": True},
+        {"completed_at": 101.0, "latency_ms": 15.0, "success": True},
+    ]
+    records = _build_window_records(
+        outcomes,
+        start_monotonic_s=100.0,
+        generation_deadline_s=104.0,  # 4s total -> 2 windows of 2s
+        start_epoch_s=1700000000.0,
+        duration_s=4,
+        window_s=2,
+        workers=1,
+        run_id="empty-window-test",
+        scenario="unit_test",
+    )
+    assert len(records) == 2
+    # Window 1 has outcomes
+    assert records[0]["requests"] == 2
+    assert records[0]["successes"] == 2
+    assert records[0]["sample_count"] == 2
+    # Window 2 is empty but schema-valid
+    assert records[1]["requests"] == 0
+    assert records[1]["successes"] == 0
+    assert records[1]["errors"] == 0
+    assert records[1]["sample_count"] == 0
+    assert records[1]["throughput_rps"] == 0.0
+    assert records[1]["p50_ms"] is None
+    assert records[1]["p99_status"] == "insufficient"
+
+
+def test_async_delivery_retries_and_graceful_drain():
+    """Test asynchronous report delivery queue retries on transient errors and drains cleanly."""
+    attempts = 0
+    lock = threading.Lock()
+
+    class FlakyReportHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def do_POST(self):
+            nonlocal attempts
+            with lock:
+                attempts += 1
+                curr = attempts
+            # Fail on first attempt, succeed on retry
+            if curr == 1:
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b'{"error":"temporary_unavailable"}')
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"accepted"}')
+
+        def log_message(self, *args, **kwargs):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FlakyReportHandler)
+    server_port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        records = run_benchmark(
+            url=f"http://127.0.0.1:{server_port}/work",
+            duration_s=1,
+            workers=1,
+            window_s=1,
+            timeout_s=1.0,
+            submit_reports=True,
+            run_id="flaky-delivery-test",
+        )
+        assert len(records) >= 1
+        # Due to retry, the submission should have succeeded
+        assert records[0]["metadata"]["report_submission"] == "accepted"
+        assert attempts >= 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
