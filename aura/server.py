@@ -117,6 +117,16 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
 
     def _send_error_json(self, status_code: int, error_code: str, message: str, close_connection: bool = False) -> None:
         """Send a structured JSON error response."""
+        try:
+            self.connection.setblocking(False)
+            self.connection.recv(65536)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.connection.setblocking(True)
+            except Exception:
+                pass
         self._send_json_response(status_code, {
             "error": error_code,
             "message": message,
@@ -287,100 +297,125 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "semantic_invariant_violation", f"Stage 2 Semantic Invariant Violation: {exc}")
             return
 
-        # Deduplication & Idempotency Check
+        # Deduplication & Idempotency Check with Concurrency Reservation
         run_id = str(ingress_payload["run_id"])
         window_id = int(ingress_payload["window_id"])
         window_key = (run_id, window_id)
 
         dedup_cache = getattr(server, "ingestion_dedup_cache", None)
         dedup_lock = getattr(server, "dedup_lock", None)
-        if dedup_cache is not None and dedup_lock is not None:
-            with dedup_lock:
-                existing_payload = dedup_cache.get(window_key)
-                if existing_payload is not None:
-                    # Compare content (excluding server receipt fields)
-                    if existing_payload == ingress_payload:
-                        # Idempotent response for identical duplicate
-                        self._send_json_response(200, {
-                            "status": "accepted_duplicate_idempotent",
-                            "run_id": run_id,
-                            "window_id": window_id,
-                        })
-                        return
+        in_flight = getattr(server, "in_flight_dedup", None)
+
+        if dedup_cache is not None and dedup_lock is not None and in_flight is not None:
+            while True:
+                with dedup_lock:
+                    existing_payload = dedup_cache.get(window_key)
+                    if existing_payload is not None:
+                        # Compare content (excluding server receipt fields)
+                        if existing_payload == ingress_payload:
+                            # Idempotent response for identical duplicate
+                            self._send_json_response(200, {
+                                "status": "accepted_duplicate_idempotent",
+                                "run_id": run_id,
+                                "window_id": window_id,
+                            })
+                            return
+                        else:
+                            # Conflicting payload with existing identity
+                            self._send_error_json(
+                                409,
+                                "conflict_duplicate_window",
+                                f"Window {window_key} has already been ingested with conflicting payload."
+                            )
+                            return
+
+                    in_flight_event = in_flight.get(window_key)
+                    if in_flight_event is not None:
+                        # Another thread is actively processing this window; wait for it outside lock
+                        pass
                     else:
-                        # Conflicting payload with existing identity
-                        self._send_error_json(
-                            409,
-                            "conflict_duplicate_window",
-                            f"Window {window_key} has already been ingested with conflicting payload."
-                        )
-                        return
+                        # Reserve in-flight execution for this window identity
+                        in_flight[window_key] = threading.Event()
+                        break
 
-        # Stage 3: Server-Owned Receipt Timestamping & Boot Identity
-        time_provider: Callable[[], float] = getattr(server, "epoch_provider", time.time)
-        mono_provider: Callable[[], float] = getattr(server, "monotonic_provider", time.monotonic)
-        boot_id_provider: Callable[[], str] = getattr(server, "boot_id_provider", get_system_boot_id)
+                # Wait on in-flight event and re-check cache
+                in_flight_event.wait(timeout=10.0)
 
+        reservation_held = True
         try:
-            server_epoch_s = float(time_provider())
-            server_monotonic_s = float(mono_provider())
-            server_boot_id = str(boot_id_provider())
-        except Exception as exc:
-            logger.error("Failed to acquire server receipt identity metadata: %s", exc)
-            self._send_error_json(500, "receipt_metadata_error", f"Server metadata provider error: {exc}")
-            return
+            # Stage 3: Server-Owned Receipt Timestamping & Boot Identity
+            time_provider: Callable[[], float] = getattr(server, "epoch_provider", time.time)
+            mono_provider: Callable[[], float] = getattr(server, "monotonic_provider", time.monotonic)
+            boot_id_provider: Callable[[], str] = getattr(server, "boot_id_provider", get_system_boot_id)
 
-        enriched_record = dict(ingress_payload)
-        enriched_record["server_received_at_epoch_s"] = server_epoch_s
-        enriched_record["server_received_at_monotonic_s"] = server_monotonic_s
-        enriched_record["server_boot_id"] = server_boot_id
-
-        # Stage 4: Enriched Schema Validation
-        ingested_validator = getattr(server, "ingested_validator", None)
-        if ingested_validator is None:
-            self._send_error_json(500, "server_configuration_error", "Ingested validator not initialized.")
-            return
-
-        ingested_errors = list(ingested_validator.iter_errors(enriched_record))
-        if ingested_errors:
-            first_err = ingested_errors[0]
-            self._send_error_json(
-                500,
-                "enriched_validation_failed",
-                f"Stage 4 Enriched Schema Violation: {first_err.message}"
-            )
-            return
-
-        # Persistence: thread-safe append to JSONL storage
-        storage = getattr(server, "storage", None)
-        if storage is not None:
             try:
-                storage.persist_record(enriched_record)
+                server_epoch_s = float(time_provider())
+                server_monotonic_s = float(mono_provider())
+                server_boot_id = str(boot_id_provider())
             except Exception as exc:
-                logger.error("Failed to persist enriched report: %s", exc)
-                self._send_error_json(500, "storage_error", "Failed to persist enriched measurement record.")
+                logger.error("Failed to acquire server receipt identity metadata: %s", exc)
+                self._send_error_json(500, "receipt_metadata_error", f"Server metadata provider error: {exc}")
                 return
 
-        # Record in dedup cache
-        if dedup_cache is not None and dedup_lock is not None:
-            with dedup_lock:
-                dedup_cache[window_key] = dict(ingress_payload)
+            enriched_record = dict(ingress_payload)
+            enriched_record["server_received_at_epoch_s"] = server_epoch_s
+            enriched_record["server_received_at_monotonic_s"] = server_monotonic_s
+            enriched_record["server_boot_id"] = server_boot_id
 
-        # Notify optional runtime callback or handoff queue
-        on_report_ingested = getattr(server, "on_report_ingested", None)
-        if on_report_ingested is not None:
-            try:
-                on_report_ingested(enriched_record)
-            except Exception as exc:
-                logger.warning("on_report_ingested callback encountered error: %s", exc)
+            # Stage 4: Enriched Schema Validation
+            ingested_validator = getattr(server, "ingested_validator", None)
+            if ingested_validator is None:
+                self._send_error_json(500, "server_configuration_error", "Ingested validator not initialized.")
+                return
 
-        self._send_json_response(200, {
-            "status": "accepted",
-            "run_id": enriched_record["run_id"],
-            "window_id": enriched_record["window_id"],
-            "server_received_at_monotonic_s": server_monotonic_s,
-            "server_boot_id": server_boot_id,
-        })
+            ingested_errors = list(ingested_validator.iter_errors(enriched_record))
+            if ingested_errors:
+                first_err = ingested_errors[0]
+                self._send_error_json(
+                    500,
+                    "enriched_validation_failed",
+                    f"Stage 4 Enriched Schema Violation: {first_err.message}"
+                )
+                return
+
+            # Persistence: thread-safe append to JSONL storage
+            storage = getattr(server, "storage", None)
+            if storage is not None:
+                try:
+                    storage.persist_record(enriched_record)
+                except Exception as exc:
+                    logger.error("Failed to persist enriched report: %s", exc)
+                    self._send_error_json(500, "storage_error", "Failed to persist enriched measurement record.")
+                    return
+
+            # Notify optional runtime callback or handoff queue (enforce backpressure)
+            on_report_ingested = getattr(server, "on_report_ingested", None)
+            if on_report_ingested is not None:
+                try:
+                    on_report_ingested(enriched_record)
+                except Exception as exc:
+                    logger.error("on_report_ingested handoff rejected with backpressure: %s", exc)
+                    self._send_error_json(503, "runtime_backpressure", f"Controller queue backpressure: {exc}")
+                    return
+
+            # Commit to dedup cache
+            if dedup_cache is not None and dedup_lock is not None:
+                with dedup_lock:
+                    dedup_cache[window_key] = dict(ingress_payload)
+
+            self._send_json_response(200, {
+                "status": "accepted",
+                "run_id": enriched_record["run_id"],
+                "window_id": enriched_record["window_id"],
+                "server_received_at_monotonic_s": server_monotonic_s,
+                "server_boot_id": server_boot_id,
+            })
+        finally:
+            if in_flight is not None and dedup_lock is not None:
+                with dedup_lock:
+                    evt = in_flight.pop(window_key, None)
+                    if evt is not None:
+                        evt.set()
 
 
 class JsonlRecordStorage:
@@ -423,6 +458,7 @@ class AuraServer:
         self.on_report_ingested = on_report_ingested
         self.output_file = Path(output_file).resolve()
         self.ingestion_dedup_cache: dict[tuple[str, int], dict[str, Any]] = {}
+        self.in_flight_dedup: dict[tuple[str, int], threading.Event] = {}
         self.dedup_lock = threading.Lock()
         self._load_existing_dedup_cache()
 
@@ -466,6 +502,7 @@ class AuraServer:
         self.http_server.boot_id_provider = self.boot_id_provider  # type: ignore[attr-defined]
         self.http_server.on_report_ingested = self.on_report_ingested  # type: ignore[attr-defined]
         self.http_server.ingestion_dedup_cache = self.ingestion_dedup_cache  # type: ignore[attr-defined]
+        self.http_server.in_flight_dedup = self.in_flight_dedup  # type: ignore[attr-defined]
         self.http_server.dedup_lock = self.dedup_lock  # type: ignore[attr-defined]
 
         self._thread: threading.Thread | None = None
