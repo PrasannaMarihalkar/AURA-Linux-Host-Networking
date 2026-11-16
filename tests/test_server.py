@@ -465,3 +465,94 @@ def test_report_zero_length_body(running_server):
         urlopen(req)
     assert exc_info.value.code == 400
 
+
+def test_concurrent_duplicate_ingestion_race_safety(running_server):
+    """Test concurrent simultaneous identical POST /report submissions are race-safe.
+
+    Verifies:
+    1. Exactly one thread gets 'accepted' and persists the record.
+    2. Concurrent duplicates receive 'accepted_duplicate_idempotent'.
+    3. Exactly one record is written to output storage (no duplicate disk lines).
+    """
+    _, base_url, output_file = running_server
+    ingress_example = load_example("client_window_ingress.example.json")
+    payload = dict(ingress_example, run_id="race-test-run", window_id=99)
+    body_bytes = json.dumps(payload).encode("utf-8")
+
+    threads_count = 8
+    barrier = threading.Barrier(threads_count)
+    results = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        req = Request(
+            f"{base_url}/report",
+            data=body_bytes,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body_bytes))},
+            method="POST",
+        )
+        barrier.wait()
+        with urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            with results_lock:
+                results.append((resp.status, data.get("status")))
+
+    threads = [threading.Thread(target=_worker) for _ in range(threads_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == threads_count
+    assert all(code == 200 for code, _ in results)
+    statuses = [s for _, s in results]
+    assert statuses.count("accepted") == 1
+    assert statuses.count("accepted_duplicate_idempotent") == threads_count - 1
+
+    # Verify exactly one record was written to the storage file
+    lines = [
+        json.loads(line)
+        for line in output_file.read_text(encoding="utf-8").strip().splitlines()
+        if line.strip()
+    ]
+    matching = [r for r in lines if r.get("run_id") == "race-test-run" and r.get("window_id") == 99]
+    assert len(matching) == 1
+
+
+def test_report_runtime_backpressure_503(tmp_path):
+    """Test that when on_report_ingested raises backpressure error, server returns HTTP 503."""
+    from aura.server import AuraServer
+
+    def _saturated_callback(_record):
+        raise RuntimeError("Queue saturated")
+
+    out_file = tmp_path / "backpressure.jsonl"
+    srv = AuraServer(
+        host="127.0.0.1",
+        port=0,
+        contracts_dir=CONTRACTS_DIR,
+        output_file=out_file,
+        boot_id_provider=lambda: "test-boot-123",
+        on_report_ingested=_saturated_callback,
+    )
+    srv.start(background=True)
+    port = srv.http_server.server_address[1]
+
+    try:
+        ingress_example = load_example("client_window_ingress.example.json")
+        body_bytes = json.dumps(ingress_example).encode("utf-8")
+        req = Request(
+            f"http://127.0.0.1:{port}/report",
+            data=body_bytes,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body_bytes))},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(req)
+        assert exc_info.value.code == 503
+        data = json.loads(exc_info.value.read().decode("utf-8"))
+        assert data["error"] == "runtime_backpressure"
+    finally:
+        srv.shutdown()
+
+

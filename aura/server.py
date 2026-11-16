@@ -117,6 +117,16 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
 
     def _send_error_json(self, status_code: int, error_code: str, message: str, close_connection: bool = False) -> None:
         """Send a structured JSON error response."""
+        try:
+            self.connection.setblocking(False)
+            self.connection.recv(65536)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.connection.setblocking(True)
+            except Exception:
+                pass
         self._send_json_response(status_code, {
             "error": error_code,
             "message": message,
@@ -204,7 +214,12 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
         server = self.server  # type: ignore[attr-defined]
         max_bytes = getattr(server, "max_body_bytes", DEFAULT_MAX_REQUEST_BODY_BYTES)
         if content_length > max_bytes:
-            # Drain body if small enough or close connection so framing is not corrupted
+            # Drain body if reasonable so the client can receive the HTTP 413 response cleanly
+            try:
+                drain_len = min(content_length, 1024 * 1024)
+                self.rfile.read(drain_len)
+            except Exception:
+                pass
             self.close_connection = True
             self._send_error_json(
                 413,
@@ -282,58 +297,125 @@ class AuraRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "semantic_invariant_violation", f"Stage 2 Semantic Invariant Violation: {exc}")
             return
 
-        # Stage 3: Server-Owned Receipt Timestamping & Boot Identity
-        time_provider: Callable[[], float] = getattr(server, "epoch_provider", time.time)
-        mono_provider: Callable[[], float] = getattr(server, "monotonic_provider", time.monotonic)
-        boot_id_provider: Callable[[], str] = getattr(server, "boot_id_provider", get_system_boot_id)
+        # Deduplication & Idempotency Check with Concurrency Reservation
+        run_id = str(ingress_payload["run_id"])
+        window_id = int(ingress_payload["window_id"])
+        window_key = (run_id, window_id)
 
+        dedup_cache = getattr(server, "ingestion_dedup_cache", None)
+        dedup_lock = getattr(server, "dedup_lock", None)
+        in_flight = getattr(server, "in_flight_dedup", None)
+
+        if dedup_cache is not None and dedup_lock is not None and in_flight is not None:
+            while True:
+                with dedup_lock:
+                    existing_payload = dedup_cache.get(window_key)
+                    if existing_payload is not None:
+                        # Compare content (excluding server receipt fields)
+                        if existing_payload == ingress_payload:
+                            # Idempotent response for identical duplicate
+                            self._send_json_response(200, {
+                                "status": "accepted_duplicate_idempotent",
+                                "run_id": run_id,
+                                "window_id": window_id,
+                            })
+                            return
+                        else:
+                            # Conflicting payload with existing identity
+                            self._send_error_json(
+                                409,
+                                "conflict_duplicate_window",
+                                f"Window {window_key} has already been ingested with conflicting payload."
+                            )
+                            return
+
+                    in_flight_event = in_flight.get(window_key)
+                    if in_flight_event is not None:
+                        # Another thread is actively processing this window; wait for it outside lock
+                        pass
+                    else:
+                        # Reserve in-flight execution for this window identity
+                        in_flight[window_key] = threading.Event()
+                        break
+
+                # Wait on in-flight event and re-check cache
+                in_flight_event.wait(timeout=10.0)
+
+        reservation_held = True
         try:
-            server_epoch_s = float(time_provider())
-            server_monotonic_s = float(mono_provider())
-            server_boot_id = str(boot_id_provider())
-        except Exception as exc:
-            logger.error("Failed to acquire server receipt identity metadata: %s", exc)
-            self._send_error_json(500, "receipt_metadata_error", f"Server metadata provider error: {exc}")
-            return
+            # Stage 3: Server-Owned Receipt Timestamping & Boot Identity
+            time_provider: Callable[[], float] = getattr(server, "epoch_provider", time.time)
+            mono_provider: Callable[[], float] = getattr(server, "monotonic_provider", time.monotonic)
+            boot_id_provider: Callable[[], str] = getattr(server, "boot_id_provider", get_system_boot_id)
 
-        enriched_record = dict(ingress_payload)
-        enriched_record["server_received_at_epoch_s"] = server_epoch_s
-        enriched_record["server_received_at_monotonic_s"] = server_monotonic_s
-        enriched_record["server_boot_id"] = server_boot_id
-
-        # Stage 4: Enriched Schema Validation
-        ingested_validator = getattr(server, "ingested_validator", None)
-        if ingested_validator is None:
-            self._send_error_json(500, "server_configuration_error", "Ingested validator not initialized.")
-            return
-
-        ingested_errors = list(ingested_validator.iter_errors(enriched_record))
-        if ingested_errors:
-            first_err = ingested_errors[0]
-            self._send_error_json(
-                500,
-                "enriched_validation_failed",
-                f"Stage 4 Enriched Schema Violation: {first_err.message}"
-            )
-            return
-
-        # Persistence: thread-safe append to JSONL storage
-        storage = getattr(server, "storage", None)
-        if storage is not None:
             try:
-                storage.persist_record(enriched_record)
+                server_epoch_s = float(time_provider())
+                server_monotonic_s = float(mono_provider())
+                server_boot_id = str(boot_id_provider())
             except Exception as exc:
-                logger.error("Failed to persist enriched report: %s", exc)
-                self._send_error_json(500, "storage_error", "Failed to persist enriched measurement record.")
+                logger.error("Failed to acquire server receipt identity metadata: %s", exc)
+                self._send_error_json(500, "receipt_metadata_error", f"Server metadata provider error: {exc}")
                 return
 
-        self._send_json_response(200, {
-            "status": "accepted",
-            "run_id": enriched_record["run_id"],
-            "window_id": enriched_record["window_id"],
-            "server_received_at_monotonic_s": server_monotonic_s,
-            "server_boot_id": server_boot_id,
-        })
+            enriched_record = dict(ingress_payload)
+            enriched_record["server_received_at_epoch_s"] = server_epoch_s
+            enriched_record["server_received_at_monotonic_s"] = server_monotonic_s
+            enriched_record["server_boot_id"] = server_boot_id
+
+            # Stage 4: Enriched Schema Validation
+            ingested_validator = getattr(server, "ingested_validator", None)
+            if ingested_validator is None:
+                self._send_error_json(500, "server_configuration_error", "Ingested validator not initialized.")
+                return
+
+            ingested_errors = list(ingested_validator.iter_errors(enriched_record))
+            if ingested_errors:
+                first_err = ingested_errors[0]
+                self._send_error_json(
+                    500,
+                    "enriched_validation_failed",
+                    f"Stage 4 Enriched Schema Violation: {first_err.message}"
+                )
+                return
+
+            # Persistence: thread-safe append to JSONL storage
+            storage = getattr(server, "storage", None)
+            if storage is not None:
+                try:
+                    storage.persist_record(enriched_record)
+                except Exception as exc:
+                    logger.error("Failed to persist enriched report: %s", exc)
+                    self._send_error_json(500, "storage_error", "Failed to persist enriched measurement record.")
+                    return
+
+            # Notify optional runtime callback or handoff queue (enforce backpressure)
+            on_report_ingested = getattr(server, "on_report_ingested", None)
+            if on_report_ingested is not None:
+                try:
+                    on_report_ingested(enriched_record)
+                except Exception as exc:
+                    logger.error("on_report_ingested handoff rejected with backpressure: %s", exc)
+                    self._send_error_json(503, "runtime_backpressure", f"Controller queue backpressure: {exc}")
+                    return
+
+            # Commit to dedup cache
+            if dedup_cache is not None and dedup_lock is not None:
+                with dedup_lock:
+                    dedup_cache[window_key] = dict(ingress_payload)
+
+            self._send_json_response(200, {
+                "status": "accepted",
+                "run_id": enriched_record["run_id"],
+                "window_id": enriched_record["window_id"],
+                "server_received_at_monotonic_s": server_monotonic_s,
+                "server_boot_id": server_boot_id,
+            })
+        finally:
+            if in_flight is not None and dedup_lock is not None:
+                with dedup_lock:
+                    evt = in_flight.pop(window_key, None)
+                    if evt is not None:
+                        evt.set()
 
 
 class JsonlRecordStorage:
@@ -367,11 +449,18 @@ class AuraServer:
         epoch_provider: Callable[[], float] | None = None,
         monotonic_provider: Callable[[], float] | None = None,
         boot_id_provider: Callable[[], str] | None = None,
+        on_report_ingested: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.max_work_iters = max_work_iters
         self.max_body_bytes = max_body_bytes
+        self.on_report_ingested = on_report_ingested
+        self.output_file = Path(output_file).resolve()
+        self.ingestion_dedup_cache: dict[tuple[str, int], dict[str, Any]] = {}
+        self.in_flight_dedup: dict[tuple[str, int], threading.Event] = {}
+        self.dedup_lock = threading.Lock()
+        self._load_existing_dedup_cache()
 
         # Resolve schemas directory
         if contracts_dir is None:
@@ -411,8 +500,43 @@ class AuraServer:
         self.http_server.epoch_provider = self.epoch_provider  # type: ignore[attr-defined]
         self.http_server.monotonic_provider = self.monotonic_provider  # type: ignore[attr-defined]
         self.http_server.boot_id_provider = self.boot_id_provider  # type: ignore[attr-defined]
+        self.http_server.on_report_ingested = self.on_report_ingested  # type: ignore[attr-defined]
+        self.http_server.ingestion_dedup_cache = self.ingestion_dedup_cache  # type: ignore[attr-defined]
+        self.http_server.in_flight_dedup = self.in_flight_dedup  # type: ignore[attr-defined]
+        self.http_server.dedup_lock = self.dedup_lock  # type: ignore[attr-defined]
 
         self._thread: threading.Thread | None = None
+
+    def _load_existing_dedup_cache(self) -> None:
+        """Populate ingestion dedup cache from pre-existing records in output_file."""
+        if not self.output_file.exists():
+            return
+        try:
+            with self.output_file.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        run_id = rec.get("run_id")
+                        window_id = rec.get("window_id")
+                        if run_id is not None and window_id is not None:
+                            clean_payload = {
+                                k: v
+                                for k, v in rec.items()
+                                if k
+                                not in {
+                                    "server_received_at_epoch_s",
+                                    "server_received_at_monotonic_s",
+                                    "server_boot_id",
+                                }
+                            }
+                            self.ingestion_dedup_cache[(str(run_id), int(window_id))] = clean_payload
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.warning("Failed to recover dedup cache from %s: %s", self.output_file, exc)
 
     def start(self, background: bool = False) -> None:
         """Start the HTTP server."""

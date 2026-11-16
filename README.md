@@ -35,7 +35,7 @@ Under a controlled Linux TCP service workload, can a lightweight host controller
 [Shravan: Resource Controls (aura/controls/)]
 ```
 
-### Current Status: Gate B — Baseline HTTP Server and Observe-Only Controller
+### Current Status: Master Integration & Verification (Gates A, B, and C Foundation)
 * **Gate A (Completed & Merged into `main`):**
   * Repository foundation, branching policies, and pull request conventions.
   * Shared JSON Schema Draft 2020-12 interchange contracts (`contracts/*.schema.json`).
@@ -44,13 +44,19 @@ Under a controlled Linux TCP service workload, can a lightweight host controller
   * Conforming test fixtures and negative validation cases (`contracts/examples/`).
   * Contract and semantic test suite (`tests/test_contracts.py`).
   * Continuous Integration matrix workflow (`.github/workflows/ci.yml`).
-* **Gate B (Implemented in this branch):**
+* **Gate B (Completed & Merged into `main`):**
   * Baseline HTTP workload server (`aura/server.py` with `/health`, deterministic `/work?n=<iters>`, and 4-stage validated `/report`).
   * Rule-based heuristic diagnosis engine (`aura/diagnosis.py`) covering CPU contention, receive activity skew, softnet congestion, and conflicting evidence.
   * Observe-only / dry-run controller daemon (`aura/controller.py`) with periodic evaluation loop, monotonic freshness checking, boot identity continuity, and schema-valid `controller_event.jsonl` emission.
   * Server-side monotonic timestamp stamping (`time.monotonic()`), Linux boot identity continuity (`/proc/sys/kernel/random/boot_id`), and thread-safe JSONL persistence.
   * Calibrated configuration and runtime thresholds (`config/thresholds.json`).
-  * Comprehensive integration test suites (`tests/test_server.py`, `tests/test_controller.py`).
+* **Master Integration & Hardening (Current `feat/prasanna-master-integration`):**
+  * Reconciled and audited all team contributions (Akash, Shridhar, Prasanna, Shravan).
+  * Benchmark client: accurate partial window duration accounting, asynchronous HTTP delivery queue with exponential backoff and graceful drain, and explicit coordinated omission documentation.
+  * HTTP server: race-safe in-flight deduplication synchronization, backpressure propagation (HTTP 503 `runtime_backpressure`), and non-blocking socket drain preventing TCP reset aborts.
+  * Reversible resource controls (`aura/controls/cgroup_cpu.py` & `aura/controls/rpsctl.py`): strict slice whitelisting (`aura-app.slice`, `aura-bg.slice`), weight range validation, pre-flight reading, readback verification, transactional rollback on mismatch, RPS sysfs multi-queue inspection, and setup/restore helper scripts (`scripts/`).
+  * Strict architectural isolation: verified that `aura.controller` never imports or invokes controls in observe-only mode.
+  * Comprehensive review and research documentation (`docs/reviews/`, `docs/research/`).
 
 ---
 
@@ -79,7 +85,14 @@ AURA-Linux-Host-Networking/
 │   ├── contracts.py                         # Pure contract validation and invariant helpers
 │   ├── server.py                            # Baseline workload HTTP server (/health, /work, /report)
 │   ├── controller.py                        # Observe-only controller daemon & periodic evaluation loop
-│   └── diagnosis.py                         # Rule-based candidate root-cause diagnosis engine
+│   ├── diagnosis.py                         # Rule-based candidate root-cause diagnosis engine
+│   ├── telemetry.py                         # Host telemetry sampling (/proc/pressure, softnet, IRQ, softirq)
+│   ├── client.py                            # Multi-threaded benchmark client with streaming window coordinator
+│   ├── runtime.py                           # Integrated runtime daemon coordinating server, telemetry, controller
+│   └── controls/                            # Resource controls (Gate C and manual actuation)
+│       ├── __init__.py
+│       ├── cgroup_cpu.py                    # Cgroup v2 cpu.weight control with rollback verification
+│       └── rpsctl.py                        # RPS sysfs multi-queue inspection and backup
 ├── config/
 │   └── thresholds.json                      # Baseline threshold and timing configuration parameters
 ├── contracts/
@@ -97,18 +110,38 @@ AURA-Linux-Host-Networking/
 │       └── action_record.example.json
 ├── docs/                                    # Architectural and research documentation
 │   ├── architecture/
-│   │   └── gate_b_design.md                 # Gate B design and implementation specification
+│   │   ├── gate_b_design.md                 # Gate B design and implementation specification
+│   │   ├── telemetry_signals.md             # Telemetry collection specification
+│   │   └── runtime_integration.md           # Integrated runtime architecture and lifecycle
 │   ├── research/
-│   └── decisions/
+│   │   └── EXPERIMENT_METHODOLOGY.md        # Scientific experiment methodology & tail-latency rigor
+│   ├── reviews/
+│   │   ├── AURA_FINAL_ENGINEERING_AUDIT.md  # Comprehensive final integration engineering audit
+│   │   ├── AURA_INTEGRATION_MATRIX.md       # Subsystem boundaries, schema contracts, and tests
+│   │   ├── KNOWN_LIMITATIONS.md             # OS virtualization quirks, load models, and constraints
+│   │   └── AURA_ENGINEERING_AUDIT.md        # Pre-integration engineering audit
+│   └── benchmark_client.md                  # Benchmark client usage and configuration
 ├── experiments/                             # Workload and benchmarking automation scripts
+│   ├── run_baseline.sh                      # Zero-load baseline run automation
+│   └── run_workload.sh                      # Under-load benchmark run automation
+├── scripts/                                 # Host configuration and administration scripts
+│   ├── setup_slices.sh                      # Systemd slice initialization script
+│   └── restore.sh                           # Clean cgroup and RPS restoration script
 ├── analysis/                                # Aggregation and plotting scripts
+│   ├── aggregate.py                         # Metrics aggregator and summary generator
+│   └── plot_results.py                      # Latency distribution and timeline plotter
 ├── tests/
 │   ├── __init__.py
-│   ├── test_contracts.py                   # Pytest suite for contract schemas and semantic rules (64 tests)
-│   ├── test_server.py                      # Pytest suite for HTTP server endpoints and ingestion (23 tests)
-│   └── test_controller.py                  # Pytest suite for diagnosis engine & controller loop (13 tests)
+│   ├── test_contracts.py                   # Pytest suite for contract schemas and semantic rules (48 tests)
+│   ├── test_server.py                      # Pytest suite for HTTP server endpoints and ingestion (28 tests)
+│   ├── test_controller.py                  # Pytest suite for diagnosis engine & controller loop (39 tests)
+│   ├── test_telemetry.py                   # Pytest suite for Linux host telemetry collection (26 tests)
+│   ├── test_client.py                      # Pytest suite for benchmark client and coordinator (28 tests)
+│   ├── test_controls.py                    # Pytest suite for cgroup CPU and RPS controls (18 tests)
+│   ├── test_analysis.py                    # Pytest suite for analysis aggregators and plotters (4 tests)
+│   └── test_runtime.py                     # Pytest suite for end-to-end runtime integration (4 tests)
 ├── requirements.txt                         # Runtime dependencies (jsonschema)
-├── requirements-dev.txt                     # Development and testing dependencies (pytest)
+├── requirements-dev.txt                     # Development and testing dependencies (pytest, matplotlib)
 ├── CONTRIBUTING.md                          # Contribution guidelines and merge gates
 └── README.md                                # Project overview and documentation
 ```
@@ -124,9 +157,9 @@ AURA uses Python 3 (supported versions: 3.10 through 3.13).
 pip install -r requirements-dev.txt
 
 # 2. Syntax compilation check across modules
-python3 -m compileall -q aura analysis tests
+python3 -m compileall -q aura analysis tests scripts
 
-# 3. Run complete test suite using pytest (100 tests)
+# 3. Run complete test suite using pytest (188 tests: 186 passed, 2 environment skipped)
 python3 -m pytest -v tests/
 
 # 4. Validate all contract schemas, fixtures, and configuration files
@@ -134,11 +167,12 @@ for f in contracts/*.schema.json contracts/examples/*.json config/*.json; do
     python3 -m json.tool "$f" > /dev/null
 done
 
-# 5. Start the AURA HTTP server
-python3 -m aura.server
+# 5. Start the complete integrated AURA runtime daemon
+python3 -m aura.runtime --host 127.0.0.1 --port 8080 --interface eth0 --results-dir results
 
-# 6. Start the observe-only controller
-python3 -m aura.controller
+# 6. Execute benchmark experiment workloads
+./experiments/run_baseline.sh
+./experiments/run_workload.sh
 ```
 
 ---
