@@ -50,6 +50,8 @@ class AuraRuntime:
         monotonic_provider: Callable[[], float] | None = None,
         telemetry_sampler: Callable[[str | None], dict[str, Any]] | None = None,
         telemetry_interval_s: float = 1.0,
+        queue_capacity: int = 1000,
+        queue_timeout_s: float = 5.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -58,6 +60,7 @@ class AuraRuntime:
         self.results_dir = Path(results_dir).resolve()
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self.telemetry_interval_s = max(0.1, float(telemetry_interval_s))
+        self.queue_timeout_s = float(queue_timeout_s)
 
         # Providers
         self.boot_id_provider = boot_id_provider or get_system_boot_id
@@ -77,7 +80,7 @@ class AuraRuntime:
         self.controller_log_path = self.results_dir / "controller_event.jsonl"
 
         # Inter-thread handoff queue for ingested client windows
-        self.report_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1000)
+        self.report_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=queue_capacity)
 
         # Components
         self.server = AuraServer(
@@ -110,9 +113,10 @@ class AuraRuntime:
     def _on_client_report_ingested(self, record: dict[str, Any]) -> None:
         """Callback invoked by AuraServer upon successfully validating/persisting a client window."""
         try:
-            self.report_queue.put_nowait(record)
+            self.report_queue.put(record, timeout=self.queue_timeout_s)
         except queue.Full:
-            LOGGER.error("Runtime report queue is full! Dropping report window %s", record.get("window_id"))
+            LOGGER.error("Runtime report queue saturated (limit=%d); applying backpressure", self.report_queue.maxsize)
+            raise RuntimeError(f"Runtime report queue saturated (limit={self.report_queue.maxsize})")
 
     def _telemetry_loop(self) -> None:
         """Periodic background thread collecting Linux host telemetry snapshots."""
@@ -200,13 +204,13 @@ class AuraRuntime:
         LOGGER.info("Initiating graceful shutdown of AURA Runtime...")
         self._running = False
 
-        # Stop HTTP server
+        # Stop HTTP server so no new incoming requests arrive
         self.server.shutdown()
 
-        # Wait for threads to finish
+        # Wait for worker threads to finish processing and terminate
         for t in self._threads:
             if t.is_alive():
-                t.join(timeout=2.0)
+                t.join(timeout=3.0)
 
         LOGGER.info("AURA Runtime shutdown complete. Total windows processed: %d", self.processed_count)
 

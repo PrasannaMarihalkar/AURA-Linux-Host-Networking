@@ -265,3 +265,60 @@ def test_runtime_restart_and_recovery(tmp_path: Path, mock_telemetry_sampler):
     assert len(events_r2) == 1  # No duplicate event written
 
     r2.shutdown()
+
+
+def test_runtime_queue_saturation_backpressure(tmp_path: Path, mock_telemetry_sampler):
+    """Test G: Queue saturation enforces backpressure and rejects overflow with HTTP 503."""
+    results_dir = tmp_path / "results_backpressure"
+    test_boot_id = "test-runtime-boot-sat"
+
+    # Configure a tiny queue with short timeout
+    runtime = AuraRuntime(
+        host="127.0.0.1",
+        port=0,
+        interface="eth0",
+        config_path=CONFIG_PATH,
+        results_dir=results_dir,
+        contracts_dir=CONTRACTS_DIR,
+        boot_id_provider=lambda: test_boot_id,
+        telemetry_sampler=mock_telemetry_sampler,
+        queue_capacity=1,
+        queue_timeout_s=0.1,
+    )
+    # Pause the controller worker so the queue fills up immediately
+    runtime.server.start(background=True)
+    port = runtime.server.http_server.server_address[1]
+
+    try:
+        raw_ingress = load_example("client_window_ingress.example.json")
+
+        # Fill the 1-slot queue
+        p1 = dict(raw_ingress, window_id=1)
+        b1 = json.dumps(p1).encode("utf-8")
+        req1 = Request(
+            f"http://127.0.0.1:{port}/report",
+            data=b1,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(b1))},
+            method="POST",
+        )
+        with urlopen(req1) as resp1:
+            assert resp1.status == 200
+
+        # Second item should trigger backpressure HTTP 503 because queue is saturated
+        p2 = dict(raw_ingress, window_id=2)
+        b2 = json.dumps(p2).encode("utf-8")
+        req2 = Request(
+            f"http://127.0.0.1:{port}/report",
+            data=b2,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(b2))},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as exc_info:
+            urlopen(req2)
+        assert exc_info.value.code == 503
+        data = json.loads(exc_info.value.read().decode("utf-8"))
+        assert data["error"] == "runtime_backpressure"
+
+    finally:
+        runtime.shutdown()
+
